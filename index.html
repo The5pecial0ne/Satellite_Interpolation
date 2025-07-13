@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WMS Tile Fetcher</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@v7.3.0/ol.css">
+  <style>
+    #map { height: 90vh; width: 100%; }
+    #controls {
+      padding: 10px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      font-family: Arial, sans-serif;
+    }
+    label {
+      font-weight: bold;
+    }
+    select, button {
+      padding: 4px 6px;
+    }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <label for="startDateSelect">Start Date:</label>
+    <select id="startDateSelect"></select>
+
+    <label for="startTimeSelect">Start Time:</label>
+    <select id="startTimeSelect"></select>
+
+    <label for="endDateSelect">End Date:</label>
+    <select id="endDateSelect"></select>
+
+    <label for="endTimeSelect">End Time:</label>
+    <select id="endTimeSelect"></select>
+
+    <button id="drawBtn">Draw Bounding Box</button>
+    <button id="fetchBtn">Fetch Image</button>
+    <button id="interpolateBtn">Generate Interpolated Video</button>
+
+    <span id="status"></span>
+  </div>
+
+  <div id="map"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/ol@v7.3.0/dist/ol.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>
