@@ -135,7 +135,7 @@ def main():
         time=time_str
     )
 
-    print(f"\n🔗 Requesting WMS tiles from: {wms_url}")
+    print(f"\nRequesting WMS tiles from: {wms_url}")
 
     # Output directory
     date_parts = [dt_ist.strftime("%Y"), dt_ist.strftime("%m"), dt_ist.strftime("%d")]
