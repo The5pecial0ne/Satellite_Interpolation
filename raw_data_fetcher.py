@@ -135,28 +135,55 @@ def fetch_tiles_concurrently(tiles, save_dir, wms_url, timestamp_ist, time_str_u
 
 def main():
     try:
-        date_input = input("Enter date (YYYY-MM-DD): ").strip()
-        time_input = input("Enter time (HH:MM) [only :15 or :45]: ").strip()
+        # --- Future support for start and end times ---
+        # date_input = input("Enter date (YYYY-MM-DD): ").strip()
+        # start_time_input = input("Enter start time (HH:MM) [only :15 or :45]: ").strip()
+        # end_time_input = input("Enter end time (HH:MM) [only :15 or :45]: ").strip()
 
-        if not re.match(r"^\d{4}-\d{2}-\d{2}$", date_input):
-            log_message("Invalid date format. Use YYYY-MM-DD.")
-            return
-        if not re.match(r"^\d{1,2}:\d{2}$", time_input):
-            log_message("Invalid time format. Use HH:MM.")
-            return
+        # if not re.match(r"^\d{4}-\d{2}-\d{2}$", date_input):
+        #     log_message("Invalid date format. Use YYYY-MM-DD.")
+        #     return
+        # if not re.match(r"^\d{1,2}:\d{2}$", start_time_input) or not re.match(r"^\d{1,2}:\d{2}$", end_time_input):
+        #     log_message("Time format must be HH:MM (e.g. 07:15)")
+        #     return
 
-        time_input = time_input.zfill(5)
-        hour, minute = map(int, time_input.split(":"))
-        if minute not in [15, 45]:
-            log_message("Only :15 and :45 minutes allowed.")
-            return
+        # start_time_input = start_time_input.zfill(5)
+        # end_time_input = end_time_input.zfill(5)
 
+        # ist = pytz.timezone("Asia/Kolkata")
+        # start_dt = ist.localize(datetime.strptime(f"{date_input} {start_time_input}", "%Y-%m-%d %H:%M"))
+        # end_dt = ist.localize(datetime.strptime(f"{date_input} {end_time_input}", "%Y-%m-%d %H:%M"))
+
+        # if start_dt.minute not in [15, 45] or end_dt.minute not in [15, 45]:
+        #     log_message("Frames only available at :15 or :45 of every hour.")
+        #     return
+        # if start_dt > end_dt:
+        #     log_message("Start time must be before end time.")
+        #     return
+
+        # --- Current input: reference datetime (loop back 10 days) ---
         ist = pytz.timezone("Asia/Kolkata")
-        input_dt = ist.localize(datetime.strptime(f"{date_input} {time_input}", "%Y-%m-%d %H:%M"))
-        start_dt = input_dt - timedelta(days=NUM_PAST_DAYS)
+        now_ist = datetime.now(ist)
+
+        # Round down to last available WMS time: either :15 or :45
+        minute = now_ist.minute
+        if minute < 15:
+            rounded_minute = 45
+            now_ist = now_ist - timedelta(hours=1)
+        elif minute < 45:
+            rounded_minute = 15
+        else:
+            rounded_minute = 45
+
+        last_available_dt = now_ist.replace(minute=rounded_minute, second=0, microsecond=0)
+
+        start_dt = last_available_dt - timedelta(days=NUM_PAST_DAYS)
         current_dt = start_dt
 
-        while current_dt <= input_dt:
+        log_message(f"Auto-calculated last available WMS timestamp: {last_available_dt.strftime('%Y-%m-%d %H:%M')} IST")
+        log_message(f"Fetching frames from {start_dt.strftime('%Y-%m-%d %H:%M')} IST to {last_available_dt.strftime('%Y-%m-%d %H:%M')} IST")
+
+        while current_dt <= last_available_dt:
             try:
                 if current_dt.minute not in [15, 45]:
                     current_dt += timedelta(minutes=30)
@@ -197,6 +224,7 @@ def main():
 
     except Exception:
         log_message(f"Fatal error in main():\n{traceback.format_exc()}")
+
 
 if __name__ == "__main__":
     main()
