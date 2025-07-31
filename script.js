@@ -1,10 +1,8 @@
 let map;
-let overlayLayer = null;
-let drawInteraction = null;
 let vectorLayer;
+let drawInteraction = null;
 let selectedExtent = null;
-let selectedBBox4326 = null;
-let drawAnchor = null;
+let overlayLayer = null;
 let currentSessionId = null;
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -23,33 +21,29 @@ document.addEventListener("DOMContentLoaded", () => {
     })
   });
 
-  populateDateOptions("startDateSelect", 3);
-  populateDateOptions("endDateSelect", 3);
+  const today = new Date();
+  const yyyy = today.getFullYear();
+  const mm = String(today.getMonth() + 1).padStart(2, '0');
+  const dd = String(today.getDate()).padStart(2, '0');
+  const todayStr = `${yyyy}-${mm}-${dd}`;
+
+  document.getElementById("startDateSelect").value = todayStr;
+  document.getElementById("endDateSelect").value = todayStr;
+  document.getElementById("previewDateSelect").value = todayStr;
+
+  document.getElementById("startDateSelect").max = todayStr;
+  document.getElementById("endDateSelect").max = todayStr;
+  document.getElementById("previewDateSelect").max = todayStr;
+
   populateTimeOptions("startTimeSelect");
   populateTimeOptions("endTimeSelect");
+  populateTimeOptions("previewTimeSelect");
 
-  document.getElementById("fetchBtn").addEventListener("click", fetchStitchedImage);
-  document.getElementById("drawBtn").addEventListener("click", activateDrawBox);
-  document.getElementById("interpolateBtn").addEventListener("click", generateVideo);
+  document.getElementById("combinedBtn").addEventListener("click", fetchAndGenerateVideo);
+  document.getElementById("previewBtn").addEventListener("click", previewSelectedFrame);
+  document.getElementById("clearPreviewBtn").addEventListener("click", clearPreview);
+  document.getElementById("drawBtn").addEventListener("click", enableBboxDrawing);
 });
-
-function populateDateOptions(selectId, pastDays = 3) {
-  const now = new Date();
-  const select = document.getElementById(selectId);
-  select.innerHTML = "";
-
-  for (let i = 0; i <= pastDays; i++) {
-    const date = new Date(now);
-    date.setDate(now.getDate() - i);
-    const yyyy = date.getFullYear();
-    const mm = String(date.getMonth() + 1).padStart(2, '0');
-    const dd = String(date.getDate()).padStart(2, '0');
-    const option = document.createElement("option");
-    option.value = `${yyyy}-${mm}-${dd}`;
-    option.textContent = `${dd}-${mm}-${yyyy}`;
-    select.appendChild(option);
-  }
-}
 
 function populateTimeOptions(selectId) {
   const select = document.getElementById(selectId);
@@ -71,100 +65,35 @@ function populateTimeOptions(selectId) {
   select.value = currentVal;
 }
 
-function activateDrawBox() {
-  if (drawInteraction) {
-    map.removeInteraction(drawInteraction);
-    vectorLayer.getSource().clear();
-  }
-
-  const tileSize = 256;
-  const resolution = map.getView().getResolution();
-  const snapSize = tileSize * resolution;
-  map.getTargetElement().style.cursor = "crosshair";
+function enableBboxDrawing() {
+  if (drawInteraction) map.removeInteraction(drawInteraction);
 
   drawInteraction = new ol.interaction.Draw({
     source: vectorLayer.getSource(),
-    type: 'Circle',
-    geometryFunction: function (coordinates, geometry) {
-      let [start, end] = coordinates;
-
-      if (!drawAnchor) {
-        drawAnchor = [...start]; // fixed point
-      }
-
-      const anchorX = drawAnchor[0];
-      const anchorY = drawAnchor[1];
-
-      const dx = end[0] - anchorX;
-      const dy = end[1] - anchorY;
-
-      const size = Math.max(Math.abs(dx), Math.abs(dy));
-      const signX = dx < 0 ? -1 : 1;
-      const signY = dy < 0 ? -1 : 1;
-
-      const newX = anchorX + signX * size;
-      const newY = anchorY + signY * size;
-
-      const minX = Math.min(anchorX, newX);
-      const minY = Math.min(anchorY, newY);
-      const maxX = Math.max(anchorX, newX);
-      const maxY = Math.max(anchorY, newY);
-
-      const coords = [
-        [minX, minY],
-        [minX, maxY],
-        [maxX, maxY],
-        [maxX, minY],
-        [minX, minY]
-      ];
-
-      if (!geometry) {
-        geometry = new ol.geom.Polygon([coords]);
-      } else {
-        geometry.setCoordinates([coords]);
-      }
-
-      return geometry;
-    }
+    type: "Circle",
+    geometryFunction: ol.interaction.Draw.createBox()
   });
 
-  drawInteraction.on('drawend', function (evt) {
-    const geometry = evt.feature.getGeometry();
-    const rawExtent = geometry.getExtent();
-
-    const snap = (val) => Math.round(val / snapSize) * snapSize;
-    const minX = snap(rawExtent[0]);
-    const minY = snap(rawExtent[1]);
-    const maxX = snap(rawExtent[2]);
-    const maxY = snap(rawExtent[3]);
-
-    selectedExtent = [minX, minY, maxX, maxY];
-
-    const coords = [
-      [minX, minY],
-      [minX, maxY],
-      [maxX, maxY],
-      [maxX, minY],
-      [minX, minY]
-    ];
-
-    const finalGeom = new ol.geom.Polygon([coords]);
-    evt.feature.setGeometry(finalGeom);
-
-    const bottomLeft = ol.proj.toLonLat([minX, minY]);
-    const topRight = ol.proj.toLonLat([maxX, maxY]);
-    selectedBBox4326 = [bottomLeft[0], bottomLeft[1], topRight[0], topRight[1]];
-
-    drawAnchor = null;
-    map.removeInteraction(drawInteraction);
-    map.getTargetElement().style.cursor = "default";
-    console.log("Selected BBOX (EPSG:4326):", selectedBBox4326);
+  drawInteraction.on("drawend", function (event) {
+    const geometry = event.feature.getGeometry();
+    selectedExtent = geometry.getExtent(); // EPSG:3857
   });
 
   map.addInteraction(drawInteraction);
 }
 
-function fetchStitchedImage() {
+function getSelectedBBox4326() {
+  if (selectedExtent) {
+    const bottomLeft = ol.proj.toLonLat([selectedExtent[0], selectedExtent[1]]);
+    const topRight = ol.proj.toLonLat([selectedExtent[2], selectedExtent[3]]);
+    return [bottomLeft[0], bottomLeft[1], topRight[0], topRight[1]];
+  } else {
+    alert("Please draw a bounding box using the 'Draw BBOX' button before proceeding.");
+    throw new Error("BBOX not drawn.");
+  }
+}
+
+function fetchAndGenerateVideo() {
   const startDate = document.getElementById("startDateSelect").value;
   const endDate = document.getElementById("endDateSelect").value;
   const startTime = document.getElementById("startTimeSelect").value;
@@ -175,8 +104,10 @@ function fetchStitchedImage() {
     return;
   }
 
-  if (!selectedBBox4326 || !selectedExtent) {
-    alert("Please draw a bounding box.");
+  const startDateTime = new Date(`${startDate}T${startTime}:00`);
+  const endDateTime = new Date(`${endDate}T${endTime}:00`);
+  if (startDateTime > endDateTime) {
+    alert("Start datetime must be before or equal to End datetime.");
     return;
   }
 
@@ -184,7 +115,15 @@ function fetchStitchedImage() {
   const endtime = `${endDate} ${endTime}`;
   const zoom = Math.floor(map.getView().getZoom());
 
-  document.getElementById("status").innerText = "Fetching stitched frames...";
+  let bbox4326;
+  try {
+    bbox4326 = getSelectedBBox4326();
+  } catch (e) {
+    return;
+  }
+
+  updateProgressBar(5);
+  document.getElementById("status").innerText = "Starting fetch...";
 
   fetch("http://localhost:8000/fetch-stitched-frames", {
     method: "POST",
@@ -192,7 +131,7 @@ function fetchStitchedImage() {
     body: JSON.stringify({
       datetime: datetime,
       endtime: endtime,
-      bbox: selectedBBox4326,
+      bbox: bbox4326,
       zoom: zoom
     })
   })
@@ -202,38 +141,151 @@ function fetchStitchedImage() {
     })
     .then(data => {
       currentSessionId = data.directory.split("/").pop();
-      document.getElementById("status").innerText = "Frames saved. Ready to interpolate.";
+      const jobId = data.job_id;
+
+      pollJobStatus(jobId);
+
+      return fetch("http://localhost:8000/interpolate-and-generate-video", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: currentSessionId,
+          job_id: jobId
+        })
+      });
+    })
+    .then(resp => {
+      if (!resp.ok) throw new Error("Interpolation failed");
+      return resp.blob();
+    })
+    .then(blob => {
+      const videoUrl = URL.createObjectURL(blob);
+      const htmlContent = `
+        <html>
+          <head><title>Interpolated Video</title></head>
+          <body style="margin:0;background:#000;">
+            <video src="${videoUrl}" autoplay loop controls style="width:100vw; height:100vh; object-fit:contain;"></video>
+          </body>
+        </html>
+      `;
+
+      const videoWindow = window.open();
+      videoWindow.document.write(htmlContent);
+      videoWindow.document.close();
+
+      document.getElementById("status").innerText = "Video ready! Opening in new tab shortly...";
+      updateProgressBar(100);
+      setTimeout(() => updateProgressBar(0), 10000);
     })
     .catch(err => {
       console.error(err);
-      document.getElementById("status").innerText = "Error fetching tiles.";
+      document.getElementById("status").innerText = "Error during processing.";
+      updateProgressBar(0);
     });
 }
 
-function generateVideo() {
-  if (!currentSessionId) {
-    alert("No stitched frames found. Please fetch tiles first.");
+function previewSelectedFrame() {
+  const date = document.getElementById("previewDateSelect").value;
+  const time = document.getElementById("previewTimeSelect").value;
+
+  if (!date || !time) {
+    alert("Please select both date and time for preview.");
     return;
   }
 
-  document.getElementById("status").innerText = "Interpolating and generating video...";
+  const datetime = `${date} ${time}`;
+  const zoom = Math.floor(map.getView().getZoom());
 
-  fetch("http://localhost:8000/interpolate-and-generate-video", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: currentSessionId })
-  })
-    .then(resp => {
-      if (!resp.ok) throw new Error("Interpolation failed");
-      return resp.json();
-    })
-    .then(data => {
-      const videoUrl = `http://localhost:8000${data.video_path}`;
-      window.open(videoUrl, "_blank");
-      document.getElementById("status").innerText = "✅ Interpolation and video generation complete.";
-    })
-    .catch(err => {
-      console.error(err);
-      document.getElementById("status").innerText = "Error generating video.";
-    });
+  let bbox4326;
+  try {
+    bbox4326 = getSelectedBBox4326();
+  } catch (e) {
+    return;
+  }
+
+  const session = currentSessionId || `session_${Math.random().toString(36).substr(2, 8)}`;
+  currentSessionId = session;
+
+  const url = new URL("http://localhost:8000/preview-frame");
+  url.searchParams.append("datetime", datetime);
+  bbox4326.forEach(val => url.searchParams.append("bbox", val));
+  url.searchParams.append("zoom", zoom);
+  url.searchParams.append("session_id", session);
+
+  const bottomLeft = ol.proj.fromLonLat([bbox4326[0], bbox4326[1]]);
+  const topRight = ol.proj.fromLonLat([bbox4326[2], bbox4326[3]]);
+  const imageExtent = [...bottomLeft, ...topRight];
+
+  if (overlayLayer) {
+    map.removeLayer(overlayLayer);
+    overlayLayer = null;
+  }
+
+  overlayLayer = new ol.layer.Image({
+    source: new ol.source.ImageStatic({
+      url: url.toString(),
+      imageExtent: imageExtent,
+      projection: map.getView().getProjection()
+    }),
+    opacity: 0.8
+  });
+
+  map.addLayer(overlayLayer);
+  document.getElementById("status").innerText = "Preview overlay added to map.";
+}
+
+function clearPreview() {
+  if (overlayLayer) {
+    map.removeLayer(overlayLayer);
+    overlayLayer = null;
+    document.getElementById("status").innerText = "Preview cleared.";
+  }
+}
+
+function updateProgressBar(percent) {
+  document.getElementById("progressBar").style.width = `${percent}%`;
+}
+
+function pollJobStatus(jobId) {
+  let lastCount = 0;
+  const shownMessages = new Set();
+
+  const interval = setInterval(() => {
+    fetch(`http://localhost:8000/job-status/${jobId}`)
+      .then(resp => {
+        if (!resp.ok) throw new Error("Status fetch failed");
+        return resp.json();
+      })
+      .then(data => {
+        const messages = data.status;
+        const logList = document.getElementById("logList");
+
+        messages.forEach(msg => {
+          if (!shownMessages.has(msg)) {
+            const entry = document.createElement("div");
+            entry.textContent = msg;
+            logList.appendChild(entry);
+            shownMessages.add(msg);
+          }
+        });
+
+        const latest = messages[messages.length - 1];
+        if (latest) document.getElementById("status").innerText = latest;
+
+        if (messages.length !== lastCount) {
+          lastCount = messages.length;
+          updateProgressBar(Math.min(90, lastCount * 10));
+        }
+
+        if (latest.includes("complete") || latest.includes("Video ready!")) {
+          updateProgressBar(100);
+          clearInterval(interval);
+        }
+      })
+      .catch(err => {
+        console.error(err);
+        clearInterval(interval);
+        document.getElementById("status").innerText = "Failed to fetch job status.";
+      });
+  }, 2000);
 }

@@ -1,16 +1,12 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>WMS Tile Fetcher</title>
+  <title>Satellite Interpolation</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@v7.3.0/ol.css">
   <style>
-    #map { height: 90vh; width: 100%; }
+    #map { height: 110vh; width: 100%; }
     #controls {
       padding: 10px;
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 10px;
       font-family: Arial, sans-serif;
     }
     label {
@@ -19,32 +15,76 @@
     select, button {
       padding: 4px 6px;
     }
+    #progressBarContainer {
+      width: 100%;
+      background-color: #ddd;
+      height: 20px;
+      border-radius: 8px;
+      margin-top: 10px;
+      overflow: hidden;
+    }
+    #progressBar {
+      height: 100%;
+      width: 0%;
+      background-color: #4caf50;
+      transition: width 0.3s ease;
+    }
   </style>
 </head>
 <body>
-  <div id="controls">
+
+<div id="controls">
+  <!-- Preview Controls -->
+  <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
+    <label for="previewDateSelect">Preview Date:</label>
+    <input type="date" id="previewDateSelect" />
+
+    <label for="previewTimeSelect">Preview Time:</label>
+    <select id="previewTimeSelect"></select>
+
+    <button id="previewBtn">Preview Frame</button>
+    <button id="clearPreviewBtn">Clear Preview</button>
+  </div>
+
+  <!-- Main Controls -->
+  <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 15px;">
     <label for="startDateSelect">Start Date:</label>
-    <select id="startDateSelect"></select>
+    <input type="date" id="startDateSelect" />
 
     <label for="startTimeSelect">Start Time:</label>
     <select id="startTimeSelect"></select>
 
     <label for="endDateSelect">End Date:</label>
-    <select id="endDateSelect"></select>
+    <input type="date" id="endDateSelect" />
 
     <label for="endTimeSelect">End Time:</label>
     <select id="endTimeSelect"></select>
 
-    <button id="drawBtn">Draw Bounding Box</button>
-    <button id="fetchBtn">Fetch Image</button>
-    <button id="interpolateBtn">Generate Interpolated Video</button>
-
-    <span id="status"></span>
+    <button id="drawBtn">Draw BBOX</button>
+    <button id="combinedBtn">Fetch & Generate Video</button>
   </div>
 
-  <div id="map"></div>
+  <span id="status" style="display: block; margin-top: 10px;"></span>
 
-  <script src="https://cdn.jsdelivr.net/npm/ol@v7.3.0/dist/ol.js"></script>
-  <script src="script.js"></script>
+  <div id="progressBarContainer"><div id="progressBar"></div></div>
+
+  <!-- Progress Log -->
+  <div style="margin-top:10px; width: 20%;">
+    <h4 style="margin:4px 0;">Progress Log</h4>
+    <div id="logList" style="
+      max-height:150px; 
+      overflow-y:auto; 
+      font-size:0.9em; 
+      background:#f8f8f8;
+      border:1px solid #000; 
+      padding:6px; 
+    "></div>
+  </div>
+</div>
+
+<div id="map"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/ol@v7.3.0/dist/ol.js"></script>
+<script src="script.js"></script>
 </body>
 </html>
