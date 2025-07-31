@@ -74,6 +74,11 @@ function enableBboxDrawing() {
     geometryFunction: ol.interaction.Draw.createBox()
   });
 
+  drawInteraction.on("drawstart", function () {
+    // Remove any previously drawn BBOXes
+    vectorLayer.getSource().clear();
+  });
+
   drawInteraction.on("drawend", function (event) {
     const geometry = event.feature.getGeometry();
     selectedExtent = geometry.getExtent(); // EPSG:3857
@@ -211,36 +216,71 @@ function previewSelectedFrame() {
   bbox4326.forEach(val => url.searchParams.append("bbox", val));
   url.searchParams.append("zoom", zoom);
   url.searchParams.append("session_id", session);
+  url.searchParams.append("_ts", Date.now()); // <-- Prevent caching
 
   const bottomLeft = ol.proj.fromLonLat([bbox4326[0], bbox4326[1]]);
   const topRight = ol.proj.fromLonLat([bbox4326[2], bbox4326[3]]);
   const imageExtent = [...bottomLeft, ...topRight];
 
+  // Remove existing overlay
   if (overlayLayer) {
     map.removeLayer(overlayLayer);
     overlayLayer = null;
   }
 
+  // Always create a new ImageStatic source with unique URL
+  const imageSource = new ol.source.ImageStatic({
+    url: url.toString(),
+    imageExtent: imageExtent,
+    projection: map.getView().getProjection()
+  });
+
   overlayLayer = new ol.layer.Image({
-    source: new ol.source.ImageStatic({
-      url: url.toString(),
-      imageExtent: imageExtent,
-      projection: map.getView().getProjection()
-    }),
-    opacity: 0.8
+    source: imageSource,
+    opacity: 0.95
   });
 
   map.addLayer(overlayLayer);
-  document.getElementById("status").innerText = "Preview overlay added to map.";
+  const logList = document.getElementById("logList");
+
+  const divider = document.createElement("div");
+  divider.style.margin = "6px 0";
+  divider.style.borderTop = "1px dashed #aaa";
+  logList.appendChild(divider);
+  
+  const logEntry = document.createElement("div");
+  const bboxStr = bbox4326.map(v => v.toFixed(2)).join(", ");
+  logEntry.textContent = `Preview overlay added to map for BBOX = (${bboxStr}) & Time = ${time} IST`;
+  logList.appendChild(logEntry);
+  
+  logList.scrollTop = logList.scrollHeight;  
 }
 
 function clearPreview() {
   if (overlayLayer) {
     map.removeLayer(overlayLayer);
     overlayLayer = null;
-    document.getElementById("status").innerText = "Preview cleared.";
   }
+
+  if (vectorLayer) {
+    vectorLayer.getSource().clear();  // Clear BBOX from map
+    selectedExtent = null;            // Reset selected extent
+  }
+
+  const logList = document.getElementById("logList");
+
+  const divider = document.createElement("div");
+  divider.style.margin = "6px 0";
+  divider.style.borderTop = "1px dashed #aaa";
+  logList.appendChild(divider);
+
+  const logEntry = document.createElement("div");
+  logEntry.textContent = "Preview and BBOX cleared.";
+  logList.appendChild(logEntry);
+
+  logList.scrollTop = logList.scrollHeight;
 }
+
 
 function updateProgressBar(percent) {
   document.getElementById("progressBar").style.width = `${percent}%`;

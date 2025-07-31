@@ -3,13 +3,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List
-from pyproj import Transformer
 from datetime import datetime, timedelta
 from PIL import Image
 from io import BytesIO
 from subprocess import run
-from pyproj import CRS
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
+from pyproj import CRS, Transformer
+from fastapi import Query
 import os, shutil, sys, re
 import math
 import pytz
@@ -20,7 +21,7 @@ import traceback
 import cv2
 import numpy as np
 import h5py
-from threading import Lock
+import hashlib
 
 # ---------------- CONFIG ----------------
 
@@ -60,6 +61,10 @@ class TileRequest(BaseModel):
 class InterpolationRequest(BaseModel):
     session_id: str
     job_id: str
+
+def bbox_hash(bbox: List[float]) -> str:
+    h = hashlib.md5(",".join(map(str, bbox)).encode()).hexdigest()
+    return h[:8]  # short unique hash
 
 
 @app.post("/fetch-stitched-frames")
@@ -241,8 +246,6 @@ def cleanup_temp_sessions():
         shutil.rmtree(temp_root, ignore_errors=True)
     TEMP_SESSION_DIRS.clear()
 
-from fastapi import Query
-
 @app.get("/preview-frame")
 def preview_frame(
     datetime_str: str = Query(..., alias="datetime"),
@@ -261,7 +264,18 @@ def preview_frame(
         os.makedirs(temp_dir, exist_ok=True)
         TEMP_SESSION_DIRS.add(temp_dir)
 
-        preview_path = os.path.join(temp_dir, "preview_frame.png")
+        bbox_id = bbox_hash(bbox)
+        preview_filename = f"preview_{timestamp_str}_{bbox_id}.png"
+        preview_path = os.path.join(temp_dir, preview_filename)
+
+        # Delete other preview images for the same time but different BBOX
+        for f in os.listdir(temp_dir):
+            if f.startswith(f"preview_{timestamp_str}_") and f != preview_filename:
+                try:
+                    os.remove(os.path.join(temp_dir, f))
+                except Exception as e:
+                    print(f"[WARN] Failed to delete old preview file: {f} -> {e}")
+
         if os.path.exists(preview_path):
             return FileResponse(preview_path, media_type="image/png")
 
@@ -357,13 +371,6 @@ class BrightnessNormalizer:
             norm[:, :, c] = np.clip((img[:, :, c] - self.global_min) * (255.0 / (self.global_max - self.global_min)), 0, 255)
 
         cv2.imwrite(output_path, norm.astype(np.uint8))
-
-from pyproj import CRS, Transformer
-import paramiko
-import h5py
-import numpy as np
-from PIL import Image
-import os
 
 def extract_region_from_hdf(remote_path, bbox_4326, output_path):
     local_h5 = os.path.join("/tmp", os.path.basename(remote_path))
