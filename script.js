@@ -75,13 +75,12 @@ function enableBboxDrawing() {
   });
 
   drawInteraction.on("drawstart", function () {
-    // Remove any previously drawn BBOXes
     vectorLayer.getSource().clear();
   });
 
   drawInteraction.on("drawend", function (event) {
     const geometry = event.feature.getGeometry();
-    selectedExtent = geometry.getExtent(); // EPSG:3857
+    selectedExtent = geometry.getExtent();
   });
 
   map.addInteraction(drawInteraction);
@@ -126,6 +125,19 @@ function fetchAndGenerateVideo() {
   } catch (e) {
     return;
   }
+
+  const logList = document.getElementById("logList");
+
+  const divider = document.createElement("div");
+  divider.style.margin = "6px 0";
+  divider.style.borderTop = "1px dashed #aaa";
+  logList.appendChild(divider);
+
+  const bboxStr = bbox4326.map(v => v.toFixed(2)).join(", ");
+  const logEntry = document.createElement("div");
+  logEntry.textContent = `Started video generation for BBOX = (${bboxStr}) & Time = ${startTime} to ${endTime} IST`;
+  logList.appendChild(logEntry);
+  logList.scrollTop = logList.scrollHeight;
 
   updateProgressBar(5);
   document.getElementById("status").innerText = "Starting fetch...";
@@ -216,19 +228,17 @@ function previewSelectedFrame() {
   bbox4326.forEach(val => url.searchParams.append("bbox", val));
   url.searchParams.append("zoom", zoom);
   url.searchParams.append("session_id", session);
-  url.searchParams.append("_ts", Date.now()); // <-- Prevent caching
+  url.searchParams.append("_ts", Date.now());
 
   const bottomLeft = ol.proj.fromLonLat([bbox4326[0], bbox4326[1]]);
   const topRight = ol.proj.fromLonLat([bbox4326[2], bbox4326[3]]);
   const imageExtent = [...bottomLeft, ...topRight];
 
-  // Remove existing overlay
   if (overlayLayer) {
     map.removeLayer(overlayLayer);
     overlayLayer = null;
   }
 
-  // Always create a new ImageStatic source with unique URL
   const imageSource = new ol.source.ImageStatic({
     url: url.toString(),
     imageExtent: imageExtent,
@@ -241,19 +251,18 @@ function previewSelectedFrame() {
   });
 
   map.addLayer(overlayLayer);
-  const logList = document.getElementById("logList");
 
+  const logList = document.getElementById("logList");
   const divider = document.createElement("div");
   divider.style.margin = "6px 0";
   divider.style.borderTop = "1px dashed #aaa";
   logList.appendChild(divider);
-  
+
   const logEntry = document.createElement("div");
   const bboxStr = bbox4326.map(v => v.toFixed(2)).join(", ");
   logEntry.textContent = `Preview overlay added to map for BBOX = (${bboxStr}) & Time = ${time} IST`;
   logList.appendChild(logEntry);
-  
-  logList.scrollTop = logList.scrollHeight;  
+  logList.scrollTop = logList.scrollHeight;
 }
 
 function clearPreview() {
@@ -263,12 +272,11 @@ function clearPreview() {
   }
 
   if (vectorLayer) {
-    vectorLayer.getSource().clear();  // Clear BBOX from map
-    selectedExtent = null;            // Reset selected extent
+    vectorLayer.getSource().clear();
+    selectedExtent = null;
   }
 
   const logList = document.getElementById("logList");
-
   const divider = document.createElement("div");
   divider.style.margin = "6px 0";
   divider.style.borderTop = "1px dashed #aaa";
@@ -280,7 +288,6 @@ function clearPreview() {
 
   logList.scrollTop = logList.scrollHeight;
 }
-
 
 function updateProgressBar(percent) {
   document.getElementById("progressBar").style.width = `${percent}%`;

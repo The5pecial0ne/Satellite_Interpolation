@@ -66,7 +66,6 @@ def bbox_hash(bbox: List[float]) -> str:
     h = hashlib.md5(",".join(map(str, bbox)).encode()).hexdigest()
     return h[:8]  # short unique hash
 
-
 @app.post("/fetch-stitched-frames")
 def fetch_stitched_frames(req: TileRequest):
     ist = pytz.timezone("Asia/Kolkata")
@@ -120,8 +119,6 @@ def fetch_stitched_frames(req: TileRequest):
         "session_id": f"session_{session_id}",
         "job_id": job_id
     }
-
-
 
 def fetch_tile(fname, remote_folder, local_dir, tile_min_x, tile_min_y,
                snapped_min_x, snapped_min_y, tile_extent):
@@ -221,9 +218,12 @@ def interpolate_and_generate_video(req: InterpolationRequest):
     with job_lock:
         job_status[job_id].append("Combining frames into final video...")
 
-    run(["ffmpeg", "-y", "-r", "15", "-f", "image2", "-i", "img%d.png",
-         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-q:v", "0", "-q:a", "0", os.path.basename(video_path)],
-         cwd=output_dir, check=True)
+    run([
+            "ffmpeg", "-y", "-r", "15", "-f", "image2", "-i", "img%d.png",
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-q:v", "0", "-q:a", "0",
+            os.path.basename(video_path)
+        ], cwd=output_dir, check=True)
 
     shutil.move(os.path.join(output_dir, os.path.basename(video_path)), video_path)
 
