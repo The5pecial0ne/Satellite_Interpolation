@@ -6,6 +6,19 @@ let overlayLayer = null;
 let currentSessionId = null;
 
 document.addEventListener("DOMContentLoaded", () => {
+  initMap();
+  initDateControls();
+  populateTimeOptions("startTimeSelect");
+  populateTimeOptions("endTimeSelect");
+  populateTimeOptions("previewTimeSelect");
+
+  document.getElementById("combinedBtn").addEventListener("click", fetchAndGenerateVideo);
+  document.getElementById("previewBtn").addEventListener("click", previewSelectedFrame);
+  document.getElementById("clearPreviewBtn").addEventListener("click", clearPreview);
+  document.getElementById("drawBtn").addEventListener("click", enableBboxDrawing);
+});
+
+function initMap() {
   const source = new ol.source.Vector({ wrapX: false });
   vectorLayer = new ol.layer.Vector({ source: source });
 
@@ -20,30 +33,16 @@ document.addEventListener("DOMContentLoaded", () => {
       zoom: 5
     })
   });
+}
 
-  const today = new Date();
-  const yyyy = today.getFullYear();
-  const mm = String(today.getMonth() + 1).padStart(2, '0');
-  const dd = String(today.getDate()).padStart(2, '0');
-  const todayStr = `${yyyy}-${mm}-${dd}`;
-
-  document.getElementById("startDateSelect").value = todayStr;
-  document.getElementById("endDateSelect").value = todayStr;
-  document.getElementById("previewDateSelect").value = todayStr;
-
-  document.getElementById("startDateSelect").max = todayStr;
-  document.getElementById("endDateSelect").max = todayStr;
-  document.getElementById("previewDateSelect").max = todayStr;
-
-  populateTimeOptions("startTimeSelect");
-  populateTimeOptions("endTimeSelect");
-  populateTimeOptions("previewTimeSelect");
-
-  document.getElementById("combinedBtn").addEventListener("click", fetchAndGenerateVideo);
-  document.getElementById("previewBtn").addEventListener("click", previewSelectedFrame);
-  document.getElementById("clearPreviewBtn").addEventListener("click", clearPreview);
-  document.getElementById("drawBtn").addEventListener("click", enableBboxDrawing);
-});
+function initDateControls() {
+  const today = new Date().toISOString().split("T")[0];
+  ["startDateSelect", "endDateSelect", "previewDateSelect"].forEach(id => {
+    const el = document.getElementById(id);
+    el.value = today;
+    el.max = today;
+  });
+}
 
 function populateTimeOptions(selectId) {
   const select = document.getElementById(selectId);
@@ -61,8 +60,7 @@ function populateTimeOptions(selectId) {
 
   const now = new Date();
   const roundedMin = now.getMinutes() < 30 ? "15" : "45";
-  const currentVal = `${String(now.getHours()).padStart(2, '0')}:${roundedMin}`;
-  select.value = currentVal;
+  select.value = `${String(now.getHours()).padStart(2, '0')}:${roundedMin}`;
 }
 
 function enableBboxDrawing() {
@@ -74,13 +72,10 @@ function enableBboxDrawing() {
     geometryFunction: ol.interaction.Draw.createBox()
   });
 
-  drawInteraction.on("drawstart", function () {
-    vectorLayer.getSource().clear();
-  });
-
-  drawInteraction.on("drawend", function (event) {
-    const geometry = event.feature.getGeometry();
-    selectedExtent = geometry.getExtent();
+  drawInteraction.on("drawstart", () => vectorLayer.getSource().clear());
+  drawInteraction.on("drawend", event => {
+    selectedExtent = event.feature.getGeometry().getExtent();
+    addLog("BBOX drawn on map.");
   });
 
   map.addInteraction(drawInteraction);
@@ -115,42 +110,25 @@ function fetchAndGenerateVideo() {
     return;
   }
 
-  const datetime = `${startDate} ${startTime}`;
-  const endtime = `${endDate} ${endTime}`;
-  const zoom = Math.floor(map.getView().getZoom());
-
   let bbox4326;
   try {
     bbox4326 = getSelectedBBox4326();
-  } catch (e) {
+  } catch {
     return;
   }
 
-  const logList = document.getElementById("logList");
-
-  const divider = document.createElement("div");
-  divider.style.margin = "6px 0";
-  divider.style.borderTop = "1px dashed #aaa";
-  logList.appendChild(divider);
-
+  const datetime = `${startDate} ${startTime}`;
+  const endtime = `${endDate} ${endTime}`;
+  const zoom = Math.floor(map.getView().getZoom());
   const bboxStr = bbox4326.map(v => v.toFixed(2)).join(", ");
-  const logEntry = document.createElement("div");
-  logEntry.textContent = `Started video generation for BBOX = (${bboxStr}) & Time = ${startTime} to ${endTime} IST`;
-  logList.appendChild(logEntry);
-  logList.scrollTop = logList.scrollHeight;
 
+  addLog(`Started video generation for BBOX = (${bboxStr}) & Time = ${startTime} → ${endTime} IST`);
   updateProgressBar(5);
-  document.getElementById("status").innerText = "Starting fetch...";
 
   fetch("http://localhost:8000/fetch-stitched-frames", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      datetime: datetime,
-      endtime: endtime,
-      bbox: bbox4326,
-      zoom: zoom
-    })
+    body: JSON.stringify({ datetime, endtime, bbox: bbox4326, zoom })
   })
     .then(resp => {
       if (!resp.ok) throw new Error("Fetch failed");
@@ -159,16 +137,12 @@ function fetchAndGenerateVideo() {
     .then(data => {
       currentSessionId = data.directory.split("/").pop();
       const jobId = data.job_id;
-
       pollJobStatus(jobId);
 
       return fetch("http://localhost:8000/interpolate-and-generate-video", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          session_id: currentSessionId,
-          job_id: jobId
-        })
+        body: JSON.stringify({ session_id: currentSessionId, job_id: jobId })
       });
     })
     .then(resp => {
@@ -185,18 +159,17 @@ function fetchAndGenerateVideo() {
           </body>
         </html>
       `;
+      const win = window.open();
+      win.document.write(htmlContent);
+      win.document.close();
 
-      const videoWindow = window.open();
-      videoWindow.document.write(htmlContent);
-      videoWindow.document.close();
-
-      document.getElementById("status").innerText = "Video ready! Opening in new tab shortly...";
+      addLog("Interpolated video opened in new tab.");
       updateProgressBar(100);
       setTimeout(() => updateProgressBar(0), 10000);
     })
     .catch(err => {
       console.error(err);
-      document.getElementById("status").innerText = "Error during processing.";
+      addLog("Error during video generation.");
       updateProgressBar(0);
     });
 }
@@ -204,28 +177,23 @@ function fetchAndGenerateVideo() {
 function previewSelectedFrame() {
   const date = document.getElementById("previewDateSelect").value;
   const time = document.getElementById("previewTimeSelect").value;
+  if (!date || !time) return alert("Please select both date and time for preview.");
 
-  if (!date || !time) {
-    alert("Please select both date and time for preview.");
+  let bbox4326;
+  try {
+    bbox4326 = getSelectedBBox4326();
+  } catch {
     return;
   }
 
   const datetime = `${date} ${time}`;
   const zoom = Math.floor(map.getView().getZoom());
-
-  let bbox4326;
-  try {
-    bbox4326 = getSelectedBBox4326();
-  } catch (e) {
-    return;
-  }
-
   const session = currentSessionId || `session_${Math.random().toString(36).substr(2, 8)}`;
   currentSessionId = session;
 
   const url = new URL("http://localhost:8000/preview-frame");
   url.searchParams.append("datetime", datetime);
-  bbox4326.forEach(val => url.searchParams.append("bbox", val));
+  bbox4326.forEach(v => url.searchParams.append("bbox", v));
   url.searchParams.append("zoom", zoom);
   url.searchParams.append("session_id", session);
   url.searchParams.append("_ts", Date.now());
@@ -234,35 +202,19 @@ function previewSelectedFrame() {
   const topRight = ol.proj.fromLonLat([bbox4326[2], bbox4326[3]]);
   const imageExtent = [...bottomLeft, ...topRight];
 
-  if (overlayLayer) {
-    map.removeLayer(overlayLayer);
-    overlayLayer = null;
-  }
-
-  const imageSource = new ol.source.ImageStatic({
-    url: url.toString(),
-    imageExtent: imageExtent,
-    projection: map.getView().getProjection()
-  });
-
+  if (overlayLayer) map.removeLayer(overlayLayer);
   overlayLayer = new ol.layer.Image({
-    source: imageSource,
+    source: new ol.source.ImageStatic({
+      url: url.toString(),
+      imageExtent: imageExtent,
+      projection: map.getView().getProjection()
+    }),
     opacity: 0.95
   });
 
   map.addLayer(overlayLayer);
-
-  const logList = document.getElementById("logList");
-  const divider = document.createElement("div");
-  divider.style.margin = "6px 0";
-  divider.style.borderTop = "1px dashed #aaa";
-  logList.appendChild(divider);
-
-  const logEntry = document.createElement("div");
   const bboxStr = bbox4326.map(v => v.toFixed(2)).join(", ");
-  logEntry.textContent = `Preview overlay added to map for BBOX = (${bboxStr}) & Time = ${time} IST`;
-  logList.appendChild(logEntry);
-  logList.scrollTop = logList.scrollHeight;
+  addLog(`Preview overlay added for BBOX = (${bboxStr}) @ ${time} IST`);
 }
 
 function clearPreview() {
@@ -270,27 +222,30 @@ function clearPreview() {
     map.removeLayer(overlayLayer);
     overlayLayer = null;
   }
-
   if (vectorLayer) {
     vectorLayer.getSource().clear();
     selectedExtent = null;
   }
+  addLog("Preview and BBOX cleared.");
+}
 
+function updateProgressBar(percent) {
+  document.getElementById("progressBar").style.width = `${percent}%`;
+}
+
+function addLog(message) {
   const logList = document.getElementById("logList");
+
   const divider = document.createElement("div");
   divider.style.margin = "6px 0";
   divider.style.borderTop = "1px dashed #aaa";
   logList.appendChild(divider);
 
-  const logEntry = document.createElement("div");
-  logEntry.textContent = "Preview and BBOX cleared.";
-  logList.appendChild(logEntry);
+  const entry = document.createElement("div");
+  entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+  logList.appendChild(entry);
 
   logList.scrollTop = logList.scrollHeight;
-}
-
-function updateProgressBar(percent) {
-  document.getElementById("progressBar").style.width = `${percent}%`;
 }
 
 function pollJobStatus(jobId) {
@@ -305,34 +260,26 @@ function pollJobStatus(jobId) {
       })
       .then(data => {
         const messages = data.status;
-        const logList = document.getElementById("logList");
-
         messages.forEach(msg => {
           if (!shownMessages.has(msg)) {
-            const entry = document.createElement("div");
-            entry.textContent = msg;
-            logList.appendChild(entry);
+            addLog(msg);
             shownMessages.add(msg);
           }
         });
 
-        const latest = messages[messages.length - 1];
-        if (latest) document.getElementById("status").innerText = latest;
+        lastCount = messages.length;
 
-        if (messages.length !== lastCount) {
-          lastCount = messages.length;
-          updateProgressBar(Math.min(90, lastCount * 10));
-        }
-
-        if (latest.includes("complete") || latest.includes("Video ready!")) {
+        if (messages.some(m => m.includes("complete") || m.includes("Video"))) {
           updateProgressBar(100);
           clearInterval(interval);
+        } else {
+          updateProgressBar(Math.min(90, lastCount * 10));
         }
       })
       .catch(err => {
         console.error(err);
         clearInterval(interval);
-        document.getElementById("status").innerText = "Failed to fetch job status.";
+        addLog("Failed to fetch job status.");
       });
   }, 2000);
 }

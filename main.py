@@ -4,24 +4,15 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List
 from datetime import datetime, timedelta
-from PIL import Image
-from io import BytesIO
-from subprocess import run
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from PIL import Image
 from pyproj import CRS, Transformer
-from fastapi import Query
-import os, shutil, sys, re
-import math
-import pytz
-import uuid
-import time
-import paramiko
-import traceback
-import cv2
+from io import BytesIO
+import os, sys, shutil, traceback, math, pytz, uuid, re, h5py, paramiko, hashlib
 import numpy as np
-import h5py
-import hashlib
+import cv2
+from subprocess import run
 
 # ---------------- CONFIG ----------------
 
@@ -29,28 +20,29 @@ TILE_SIZE_PX = 256
 TIME_INTERVAL_MINUTES = 30
 MAX_WORKERS = 8
 
-transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
-
-TEMP_SESSION_DIRS = set()
-
 SSH_HOST = "192.168.2.221"
 SSH_PORT = 22
 SSH_USERNAME = "sac"
 SSH_PASSWORD = "sac123"
 REMOTE_HDF_DIR = "/home/sac/karnav/INSAT/30"
 
+TEMP_SESSION_DIRS = set()
 job_status = {}
 job_lock = Lock()
+transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
 
-# ---------------- FASTAPI ----------------
+# ---------------- FASTAPI INIT ----------------
 
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------- MODELS ----------------
 
 class TileRequest(BaseModel):
     datetime: str
@@ -62,9 +54,30 @@ class InterpolationRequest(BaseModel):
     session_id: str
     job_id: str
 
+# ---------------- HELPERS ----------------
+
 def bbox_hash(bbox: List[float]) -> str:
-    h = hashlib.md5(",".join(map(str, bbox)).encode()).hexdigest()
-    return h[:8]  # short unique hash
+    return hashlib.md5(",".join(map(str, bbox)).encode()).hexdigest()[:8]
+
+def create_temp_dir(session_id: str) -> str:
+    temp_dir = os.path.join(os.path.dirname(__file__), "temp_stitched", f"session_{session_id}")
+    os.makedirs(temp_dir, exist_ok=True)
+    TEMP_SESSION_DIRS.add(temp_dir)
+    return temp_dir
+
+def fetch_remote_h5(remote_path: str) -> str:
+    local_h5 = os.path.join("/tmp", os.path.basename(remote_path))
+    print(f"[DEBUG] Fetching HDF5: {remote_path}")
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(SSH_HOST, port=SSH_PORT, username=SSH_USERNAME, password=SSH_PASSWORD)
+    try:
+        ssh.open_sftp().get(remote_path, local_h5)
+    finally:
+        ssh.close()
+    return local_h5
+
+# ---------------- API: FETCH FRAMES ----------------
 
 @app.post("/fetch-stitched-frames")
 def fetch_stitched_frames(req: TileRequest):
@@ -77,35 +90,25 @@ def fetch_stitched_frames(req: TileRequest):
     if start_dt > end_dt:
         raise HTTPException(status_code=400, detail="Start time must be before end time.")
 
-    session_id = uuid.uuid4().hex[:8]
-    job_id = uuid.uuid4().hex[:8]
+    session_id, job_id = uuid.uuid4().hex[:8], uuid.uuid4().hex[:8]
+    temp_dir = create_temp_dir(session_id)
+
     with job_lock:
         job_status[job_id] = ["Job started..."]
-
-    temp_dir = os.path.join(os.path.dirname(__file__), "temp_stitched", f"session_{session_id}")
-    os.makedirs(temp_dir, exist_ok=True)
-    TEMP_SESSION_DIRS.add(temp_dir)
 
     current_time = start_dt
     while current_time <= end_dt:
         timestamp_str = current_time.strftime("%H%M")
         frame_output_path = os.path.join(temp_dir, f"frame_{timestamp_str}.png")
-
         with job_lock:
             job_status[job_id].append(f"Fetching frame for time {current_time.strftime('%H:%M')}")
 
         try:
-            # Convert IST -> UTC for filename
-            utc_dt = current_time.astimezone(pytz.utc)
-            utc_time_str = utc_dt.strftime('%H%M')
-            h5_filename = f"3RIMG_{current_time.strftime('%d%b%Y').upper()}_{utc_time_str}_L2C_INS_V01R00.h5"
-            remote_h5_path = os.path.join(REMOTE_HDF_DIR, h5_filename)
-
-            extract_region_from_hdf(remote_h5_path, req.bbox, frame_output_path)
-
+            utc_time = current_time.astimezone(pytz.utc).strftime('%H%M')
+            filename = f"3RIMG_{current_time.strftime('%d%b%Y').upper()}_{utc_time}_L2C_INS_V01R00.h5"
+            extract_region_from_hdf(os.path.join(REMOTE_HDF_DIR, filename), req.bbox, frame_output_path)
             with job_lock:
                 job_status[job_id].append(f"Stitched frame for time {current_time.strftime('%H:%M')}")
-
         except Exception as e:
             traceback.print_exc()
             with job_lock:
@@ -120,117 +123,83 @@ def fetch_stitched_frames(req: TileRequest):
         "job_id": job_id
     }
 
-def fetch_tile(fname, remote_folder, local_dir, tile_min_x, tile_min_y,
-               snapped_min_x, snapped_min_y, tile_extent):
-    try:
-        transport = paramiko.Transport((SSH_HOST, SSH_PORT))
-        transport.connect(username=SSH_USERNAME, password=SSH_PASSWORD)
-        sftp = paramiko.SFTPClient.from_transport(transport)
-
-        os.makedirs(local_dir, exist_ok=True)
-        local_path = os.path.join(local_dir, fname)
-        remote_path = os.path.join(remote_folder, fname)
-
-        if not os.path.exists(local_path) or os.path.getsize(local_path) < 10_000:
-            sftp.get(remote_path, local_path)
-
-        sftp.close()
-        transport.close()
-
-        img = Image.open(local_path).convert("RGBA")
-        col = int((tile_min_x - snapped_min_x) / tile_extent)
-        row = int((tile_min_y - snapped_min_y) / tile_extent)
-        return (col, row, img)
-
-    except Exception as e:
-        print(f"[Thread error] {fname}: {e}")
-        return None
+# ---------------- API: INTERPOLATION ----------------
 
 @app.post("/interpolate-and-generate-video")
 def interpolate_and_generate_video(req: InterpolationRequest):
     job_id = req.job_id
     session_dir = os.path.join(os.path.dirname(__file__), "temp_stitched", req.session_id)
-    normalized_dir = os.path.join(session_dir, "normalized")
+    norm_dir = os.path.join(session_dir, "normalized")
     output_dir = os.path.join(session_dir, "video_frames")
     os.makedirs(output_dir, exist_ok=True)
 
-    frame_files = [f for f in os.listdir(session_dir) if f.startswith("frame_") and f.endswith(".png")]
+    frame_files = sorted(
+        [f for f in os.listdir(session_dir) if f.startswith("frame_") and f.endswith(".png")],
+        key=lambda f: int(re.search(r"_(\d{4})", f).group(1))
+    )
+
     if len(frame_files) < 2:
-        raise HTTPException(status_code=400, detail="At least two stitched frames required for interpolation.")
+        raise HTTPException(status_code=400, detail="At least two stitched frames required.")
 
-    # Brightness normalization
-    try:
-        normalizer = BrightnessNormalizer(input_dir=session_dir, output_dir=normalized_dir, max_threads=MAX_WORKERS)
-        normalizer.compute_global_min_max()
-        normalizer.normalize_images()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Brightness normalization failed: {str(e)}")
+    normalizer = BrightnessNormalizer(session_dir, norm_dir, MAX_WORKERS)
+    normalizer.compute_global_min_max()
+    normalizer.normalize_images()
 
-    frames = sorted([
-        f for f in os.listdir(normalized_dir)
-        if f.startswith("frame_") and f.endswith(".png")
-    ], key=lambda f: int(re.search(r"_(\d{4})", f).group(1)))
+    frames = sorted(
+        [f for f in os.listdir(norm_dir) if f.startswith("frame_")],
+        key=lambda f: int(re.search(r"_(\d{4})", f).group(1))
+    )
 
-    rife_script = os.path.abspath(os.path.join("Practical-RIFE", "inference_img.py"))
-    rife_model = os.path.abspath(os.path.join("Practical-RIFE", "train_log"))
+    rife_script = os.path.abspath("Practical-RIFE/inference_img.py")
+    rife_model = os.path.abspath("Practical-RIFE/train_log")
     python_exec = sys.executable
-
     global_frame_index = 0
-    for i in range(len(frames) - 1):
-        frame_a = os.path.join(normalized_dir, frames[i])
-        frame_b = os.path.join(normalized_dir, frames[i + 1])
 
-        time_a = re.search(r"_(\d{4})", frames[i]).group(1)
-        time_b = re.search(r"_(\d{4})", frames[i + 1]).group(1)
+    for i in range(len(frames) - 1):
+        time_a, time_b = frames[i], frames[i + 1]
+        t1, t2 = re.search(r"_(\d{4})", time_a).group(1), re.search(r"_(\d{4})", time_b).group(1)
         with job_lock:
-            job_status[job_id].append(f"Generating frames between {time_a[:2]}:{time_a[2:]} and {time_b[:2]}:{time_b[2:]}")
-
-    for i in range(len(frames) - 1):
-        frame_a = os.path.join(normalized_dir, frames[i])
-        frame_b = os.path.join(normalized_dir, frames[i + 1])
+            job_status[job_id].append(f"Generating frames between {t1[:2]}:{t1[2:]} and {t2[:2]}:{t2[2:]}")
 
         tmp_dir = os.path.join(session_dir, "tmp_rife")
         os.makedirs(tmp_dir, exist_ok=True)
-        shutil.copy(frame_a, os.path.join(tmp_dir, "0.png"))
-        shutil.copy(frame_b, os.path.join(tmp_dir, "1.png"))
+        shutil.copy(os.path.join(norm_dir, time_a), os.path.join(tmp_dir, "0.png"))
+        shutil.copy(os.path.join(norm_dir, time_b), os.path.join(tmp_dir, "1.png"))
 
-        run([python_exec, rife_script, "--img", "0.png", "1.png", "--exp", "5", "--model", rife_model],
-            cwd=tmp_dir, check=True)
+        run([python_exec, rife_script, "--img", "0.png", "1.png", "--exp", "5", "--model", rife_model], cwd=tmp_dir, check=True)
 
-        shutil.copy(frame_a, os.path.join(output_dir, f"img{global_frame_index}.png"))
+        shutil.copy(os.path.join(norm_dir, time_a), os.path.join(output_dir, f"img{global_frame_index}.png"))
         global_frame_index += 1
 
-        output_files = os.listdir(os.path.join(tmp_dir, "output"))
-        output_files = sorted(
-            output_files,
-            key=lambda name: int(re.search(r"(\d+)", name).group(1)) if re.search(r"(\d+)", name) else float("inf")
-        )
-
-        for f in output_files:
+        for f in sorted(os.listdir(os.path.join(tmp_dir, "output")), key=lambda n: int(re.search(r"(\d+)", n).group(1))):
             shutil.move(os.path.join(tmp_dir, "output", f), os.path.join(output_dir, f"img{global_frame_index}.png"))
             global_frame_index += 1
 
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception as e:
+            print(f"[WARN] Failed to remove tmp_rife: {e}")
 
-    shutil.copy(os.path.join(normalized_dir, frames[-1]), os.path.join(output_dir, f"img{global_frame_index}.png"))
+    shutil.copy(os.path.join(norm_dir, frames[-1]), os.path.join(output_dir, f"img{global_frame_index}.png"))
 
     video_path = os.path.join(session_dir, "interpolated_video.mp4")
     with job_lock:
         job_status[job_id].append("Combining frames into final video...")
 
     run([
-            "ffmpeg", "-y", "-r", "15", "-f", "image2", "-i", "img%d.png",
-            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-q:v", "0", "-q:a", "0",
-            os.path.basename(video_path)
-        ], cwd=output_dir, check=True)
+        "ffmpeg", "-y", "-r", "15", "-f", "image2", "-i", "img%d.png",
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-q:v", "0", "-q:a", "0",
+        os.path.basename(video_path)
+    ], cwd=output_dir, check=True)
 
     shutil.move(os.path.join(output_dir, os.path.basename(video_path)), video_path)
 
     with job_lock:
         job_status[job_id].append("Video generation complete.")
-
     return FileResponse(path=video_path, media_type="video/mp4", filename="interpolated_video.mp4")
+
+# ---------------- API: JOB STATUS ----------------
 
 @app.get("/job-status/{job_id}")
 def get_job_status(job_id: str):
@@ -239,12 +208,7 @@ def get_job_status(job_id: str):
             raise HTTPException(status_code=404, detail="Job ID not found")
         return {"status": job_status[job_id]}
 
-@app.on_event("shutdown")
-def cleanup_temp_sessions():
-    temp_root = os.path.join(os.path.dirname(__file__), "temp_stitched")
-    if os.path.exists(temp_root):
-        shutil.rmtree(temp_root, ignore_errors=True)
-    TEMP_SESSION_DIRS.clear()
+# ---------------- API: PREVIEW FRAME ----------------
 
 @app.get("/preview-frame")
 def preview_frame(
@@ -256,21 +220,18 @@ def preview_frame(
     try:
         ist = pytz.timezone("Asia/Kolkata")
         dt = ist.localize(datetime.strptime(datetime_str, "%Y-%m-%d %H:%M"))
+
         if dt.minute not in [15, 45]:
             raise HTTPException(status_code=400, detail="Only :15 or :45 minutes allowed.")
 
-        timestamp_str = dt.strftime("%H%M")
-        temp_dir = os.path.join(os.path.dirname(__file__), "temp_stitched", session_id)
-        os.makedirs(temp_dir, exist_ok=True)
-        TEMP_SESSION_DIRS.add(temp_dir)
-
+        timestamp = dt.strftime("%H%M")
+        temp_dir = create_temp_dir(session_id)
         bbox_id = bbox_hash(bbox)
-        preview_filename = f"preview_{timestamp_str}_{bbox_id}.png"
+        preview_filename = f"preview_{timestamp}_{bbox_id}.png"
         preview_path = os.path.join(temp_dir, preview_filename)
 
-        # Delete other preview images for the same time but different BBOX
         for f in os.listdir(temp_dir):
-            if f.startswith(f"preview_{timestamp_str}_") and f != preview_filename:
+            if f.startswith(f"preview_{timestamp}_") and f != preview_filename:
                 try:
                     os.remove(os.path.join(temp_dir, f))
                 except Exception as e:
@@ -279,13 +240,9 @@ def preview_frame(
         if os.path.exists(preview_path):
             return FileResponse(preview_path, media_type="image/png")
 
-        # Convert IST -> UTC for filename
-        utc_dt = dt.astimezone(pytz.utc)
-        utc_time_str = utc_dt.strftime('%H%M')
+        utc_time_str = dt.astimezone(pytz.utc).strftime('%H%M')
         h5_filename = f"3RIMG_{dt.strftime('%d%b%Y').upper()}_{utc_time_str}_L2C_INS_V01R00.h5"
-        remote_h5_path = os.path.join(REMOTE_HDF_DIR, h5_filename)
-
-        extract_region_from_hdf(remote_h5_path, bbox, preview_path)
+        extract_region_from_hdf(os.path.join(REMOTE_HDF_DIR, h5_filename), bbox, preview_path)
 
         return FileResponse(preview_path, media_type="image/png")
 
@@ -293,6 +250,52 @@ def preview_frame(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
 
+# ---------------- UTIL: HDF REGION EXTRACTION ----------------
+
+def extract_region_from_hdf(remote_path, bbox_4326, output_path):
+    local_h5 = fetch_remote_h5(remote_path)
+
+    with h5py.File(local_h5, "r") as f:
+        x_vals = f["X"][:]
+        y_vals = f["Y"][:]
+        data = f["INS"][0]
+        fill = f["INS"].attrs.get("_FillValue", -999.0)
+
+        try:
+            grid_mapping = f["Projection_Information"]
+            cf_attrs = {k: (v[0] if isinstance(v, np.ndarray) else v) for k, v in grid_mapping.attrs.items()}
+            cf_attrs = {k: v.decode() if isinstance(v, bytes) else v for k, v in cf_attrs.items()}
+            crs_cf = CRS.from_cf(cf_attrs)
+        except Exception as e:
+            raise ValueError("Invalid CRS metadata in file")
+
+        transformer = Transformer.from_crs("EPSG:4326", crs_cf, always_xy=True)
+        min_x, min_y = transformer.transform(bbox_4326[0], bbox_4326[1])
+        max_x, max_y = transformer.transform(bbox_4326[2], bbox_4326[3])
+
+        x_start = max(0, min(np.searchsorted(x_vals, min_x, side="left"), data.shape[1]))
+        x_end   = max(0, min(np.searchsorted(x_vals, max_x, side="right"), data.shape[1]))
+        y_rev = y_vals[::-1]
+        y_start = len(y_vals) - np.searchsorted(y_rev, max_y, side="left")
+        y_end   = len(y_vals) - np.searchsorted(y_rev, min_y, side="right")
+        y_start = max(0, min(y_start, data.shape[0]))
+        y_end   = max(0, min(y_end, data.shape[0]))
+
+        subset = data[y_start:y_end, x_start:x_end]
+        if subset.size == 0:
+            raise ValueError("Selected BBOX contains no data or is out of bounds.")
+        if np.all(subset == fill):
+            raise ValueError("Selected BBOX contains only fill values.")
+
+        subset = np.ma.masked_equal(subset, fill)
+        subset = np.ma.filled(subset, 0)
+        norm = (subset - subset.min()) / (subset.max() - subset.min() + 1e-6)
+        Image.fromarray((norm * 255).astype(np.uint8)).save(output_path)
+        print(f"[INFO] Saved preview to {output_path}")
+
+    os.remove(local_h5)
+
+# ---------------- CLASS: BRIGHTNESS NORMALIZER ----------------
 
 class BrightnessNormalizer:
     def __init__(self, input_dir, output_dir, max_threads=8):
@@ -303,152 +306,64 @@ class BrightnessNormalizer:
         self.global_max = None
         os.makedirs(self.output_dir, exist_ok=True)
 
-    def min_percentile(self, img):
-        return np.percentile(img.flatten(), 2)
-
-    def max_percentile(self, img):
-        return np.percentile(img.flatten(), 98)
+    def _compute_file_min_max(self, filename):
+        img = cv2.imread(os.path.join(self.input_dir, filename), cv2.IMREAD_GRAYSCALE)
+        return np.percentile(img, 2), np.percentile(img, 98)
 
     def compute_global_min_max(self):
-        min_vals = []
-        max_vals = []
-        files = [f for f in os.listdir(self.input_dir) if f.endswith('.png') and f.startswith('frame_')]
-
+        files = [f for f in os.listdir(self.input_dir) if f.startswith("frame_") and f.endswith(".png")]
         if not files:
-            raise ValueError(f"No frame_*.png files found in directory: {self.input_dir}")
+            raise ValueError("No input frames found for min/max computation.")
 
+        min_vals, max_vals = [], []
         with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
             futures = {executor.submit(self._compute_file_min_max, f): f for f in files}
             for future in as_completed(futures):
                 try:
                     min_val, max_val = future.result()
                     min_vals.append(min_val)
-
                     max_vals.append(max_val)
                 except Exception as e:
-                    print(f"Failed to compute min/max: {e}")
+                    print(f"[ERROR] Min/Max computation failed: {e}")
 
         if not min_vals or not max_vals:
-            raise ValueError("Failed to compute min/max values from frames.")
-
-        self.global_min = min(min_vals)
-        self.global_max = max(max_vals)
-        print(f"Global min: {self.global_min}, max: {self.global_max}")
-
-    def _compute_file_min_max(self, filename):
-        img = cv2.imread(os.path.join(self.input_dir, filename), cv2.IMREAD_GRAYSCALE)
-        return self.min_percentile(img), self.max_percentile(img)
-
-    def normalize_images(self):
-        files = [f for f in os.listdir(self.input_dir) if f.endswith('.png') and f.startswith('frame_')]
-
-        with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
-            futures = {
-                executor.submit(self._normalize_file, f): f for f in files
-            }
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    print(f"Failed to normalize: {e}")
+            raise ValueError("Could not compute global brightness stats.")
+        self.global_min, self.global_max = min(min_vals), max(max_vals)
+        print(f"[INFO] Global min/max: {self.global_min:.2f}, {self.global_max:.2f}")
 
     def _normalize_file(self, filename):
         input_path = os.path.join(self.input_dir, filename)
         output_path = os.path.join(self.output_dir, filename)
 
         img = cv2.imread(input_path, cv2.IMREAD_UNCHANGED)
-
         if img is None:
-            print(f"Warning: Failed to load image {input_path}")
+            print(f"[WARN] Failed to load image: {input_path}")
             return
 
-        if len(img.shape) == 2:  # grayscale fallback
+        if len(img.shape) == 2:
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
 
-        # Normalize each channel independently
         norm = np.zeros_like(img)
+        scale = 255.0 / (self.global_max - self.global_min)
         for c in range(3):
-            norm[:, :, c] = np.clip((img[:, :, c] - self.global_min) * (255.0 / (self.global_max - self.global_min)), 0, 255)
-
+            norm[:, :, c] = np.clip((img[:, :, c] - self.global_min) * scale, 0, 255)
         cv2.imwrite(output_path, norm.astype(np.uint8))
 
-def extract_region_from_hdf(remote_path, bbox_4326, output_path):
-    local_h5 = os.path.join("/tmp", os.path.basename(remote_path))
+    def normalize_images(self):
+        files = [f for f in os.listdir(self.input_dir) if f.startswith("frame_") and f.endswith(".png")]
+        with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
+            futures = {executor.submit(self._normalize_file, f): f for f in files}
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"[ERROR] Normalization failed: {e}")
 
-    print(f"[DEBUG] Attempting to fetch remote HDF5 file: {remote_path}")
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(SSH_HOST, port=SSH_PORT, username=SSH_USERNAME, password=SSH_PASSWORD)
-    sftp = ssh.open_sftp()
-    try:
-        sftp.get(remote_path, local_h5)
-    finally:
-        sftp.close()
-        ssh.close()
+# ---------------- SHUTDOWN CLEANUP ----------------
 
-    with h5py.File(local_h5, "r") as f:
-        x_vals = f["X"][:]
-        y_vals = f["Y"][:]
-        data = f["INS"][0]
-        fill_value = f["INS"].attrs.get("_FillValue", -999.0)
-
-        # -------- CF Metadata to CRS --------
-        grid_mapping = f["Projection_Information"]
-        cf_attrs = {}
-        for k, v in grid_mapping.attrs.items():
-            if isinstance(v, np.ndarray) and v.shape == (1,):
-                val = v[0]
-            else:
-                val = v
-            if isinstance(val, bytes):
-                val = val.decode()
-            cf_attrs[k] = val
-
-        try:
-            crs_cf = CRS.from_cf(cf_attrs)
-        except Exception as e:
-            print("[ERROR] Failed to construct CRS from CF:", e)
-            raise ValueError("Could not parse CRS from file metadata.")
-
-        transformer = Transformer.from_crs("EPSG:4326", crs_cf, always_xy=True)
-
-        # -------- Transform BBOX --------
-        min_lon, min_lat, max_lon, max_lat = bbox_4326
-        min_x, min_y = transformer.transform(min_lon, min_lat)
-        max_x, max_y = transformer.transform(max_lon, max_lat)
-
-        # -------- Pixel Range in Data --------
-        x_start = np.searchsorted(x_vals, min_x, side="left")
-        x_end   = np.searchsorted(x_vals, max_x, side="right")
-        x_start = max(0, min(x_start, data.shape[1]))
-        x_end   = max(0, min(x_end, data.shape[1]))
-
-        y_start_rev = np.searchsorted(y_vals[::-1], max_y, side="left")
-        y_end_rev   = np.searchsorted(y_vals[::-1], min_y, side="right")
-        y_start = len(y_vals) - y_start_rev
-        y_end   = len(y_vals) - y_end_rev
-        y_start = max(0, min(y_start, data.shape[0]))
-        y_end   = max(0, min(y_end, data.shape[0]))
-
-        print(f"[DEBUG] Extracting pixels: x({x_start}:{x_end}), y({y_start}:{y_end})")
-
-        subset = data[y_start:y_end, x_start:x_end]
-
-        if subset.size == 0:
-            print("[WARNING] Extracted region is empty due to out-of-bounds or narrow BBOX.")
-            raise ValueError("Selected BBOX contains no data or is out of bounds.")
-
-        if np.all(subset == fill_value):
-            print("[WARNING] Selected BBOX contains only fill values.")
-            raise ValueError("Selected BBOX contains only fill values.")
-
-        # -------- Normalize and Save --------
-        subset = np.ma.masked_equal(subset, fill_value)
-        subset = np.ma.filled(subset, 0)
-        norm = (subset - subset.min()) / (subset.max() - subset.min() + 1e-6)
-        image = (norm * 255).astype(np.uint8)
-
-        Image.fromarray(image).save(output_path)
-        print(f"[INFO] Saved subset to {output_path}")
-
-    os.remove(local_h5)
+@app.on_event("shutdown")
+def cleanup_temp_sessions():
+    temp_root = os.path.join(os.path.dirname(__file__), "temp_stitched")
+    if os.path.exists(temp_root):
+        shutil.rmtree(temp_root, ignore_errors=True)
+    TEMP_SESSION_DIRS.clear()
