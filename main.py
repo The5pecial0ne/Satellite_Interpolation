@@ -24,7 +24,7 @@ SSH_HOST = "192.168.2.221"
 SSH_PORT = 22
 SSH_USERNAME = "sac"
 SSH_PASSWORD = "sac123"
-REMOTE_HDF_DIR = "/home/sac/karnav/INSAT/30"
+REMOTE_HDF_DIR = "/mnt/infortrend_nas_nlsas3/RAW_DATA/INSAT3R/L1B_STD/"
 
 TEMP_SESSION_DIRS = set()
 job_status = {}
