@@ -71,6 +71,8 @@ def fetch_remote_h5(remote_path: str) -> str:
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.connect(SSH_HOST, port=SSH_PORT, username=SSH_USERNAME, password=SSH_PASSWORD)
+    year, month, day = date_folder.split("-")
+    remote_folder = os.path.join(REMOTE_HDF_DIR, year, month.zfill(2), day.zfill(2))
     try:
         ssh.open_sftp().get(remote_path, local_h5)
     finally:
