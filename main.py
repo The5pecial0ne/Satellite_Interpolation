@@ -264,52 +264,52 @@ def preview_frame(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
 
-# UTIL: HDF REGION EXTRACTION (v3 - Handles Multiple Resolutions)
+# UTIL: HDF REGION EXTRACTION (v4 - Final with Scaling)
 def extract_region_from_hdf(remote_path, bbox_4326, output_path):
     """
-    Extracts a geographic region from the HDF5 file, automatically handling
-    different resolutions for different data bands (e.g., TIR vs. VIS).
+    Extracts a geographic region from the HDF5 file, handling multiple
+    resolutions and applying the necessary scale factor to the coordinates.
     """
     local_h5 = fetch_remote_h5(remote_path)
 
     try:
         with h5py.File(local_h5, "r") as f:
             # --- CONFIGURATION ---
-            # Set the data band you want to process.
-            # Options: 'IMG_TIR1' (low-res), 'IMG_VIS' (high-res), 'IMG_SWIR' (high-res)
             data_key = 'IMG_VIS' 
 
             if data_key not in f:
-                available_keys = list(f.keys())
-                raise ValueError(f"Data key '{data_key}' not found. Available keys: {available_keys}")
+                raise ValueError(f"Data key '{data_key}' not found in file.")
 
             # 1. Dynamically select the correct Latitude/Longitude keys
             if data_key in ['IMG_VIS', 'IMG_SWIR']:
                 lon_key = 'Longitude_VIS'
                 lat_key = 'Latitude_VIS'
-            else: # Default for TIR, WV, etc.
+            else:
                 lon_key = 'Longitude'
                 lat_key = 'Latitude'
 
             print(f"[INFO] Using data key '{data_key}' with coordinate keys '{lat_key}' and '{lon_key}'.")
 
             if lon_key not in f or lat_key not in f:
-                raise ValueError(f"Required coordinate keys '{lat_key}' or '{lon_key}' not found in file.")
+                raise ValueError(f"Required coordinate keys '{lat_key}' or '{lon_key}' not found.")
 
-            # 2. Read the data and the appropriate coordinate LUTs
-            lons = f[lon_key][:]
-            lats = f[lat_key][:]
-            data = f[data_key][:].squeeze() # .squeeze() handles shapes like (1, H, W)
+            # 2. Read coordinate datasets and apply the scale factor
+            lon_ds = f[lon_key]
+            lat_ds = f[lat_key]
 
-            # Check for shape consistency before proceeding
-            if data.shape != lats.shape or data.shape != lons.shape:
-                raise ValueError(f"Shape mismatch! Data '{data_key}' shape {data.shape} does not match "
-                                 f"coordinate shapes ({lats.shape}, {lons.shape}).")
-
-            # Get the fill value from the dataset's attributes
-            fill_value = f[data_key].attrs.get('_FillValue', -999.0)
+            # The crucial step: Convert integer coordinates to degrees
+            lon_scale = lon_ds.attrs['scale_factor'][0]
+            lat_scale = lat_ds.attrs['scale_factor'][0]
             
-            # 3. Find pixel indices for the given bounding box
+            lons = lon_ds[:] * lon_scale
+            lats = lat_ds[:] * lat_scale
+
+            data = f[data_key][:].squeeze()
+
+            if data.shape != lats.shape:
+                raise ValueError(f"Shape mismatch! Data shape {data.shape} != coordinate shape {lats.shape}.")
+            
+            # 3. Find pixel indices for the given BBOX (now in correct units)
             min_lon, min_lat, max_lon, max_lat = bbox_4326
             valid_pixels = (lons >= min_lon) & (lons <= max_lon) & \
                            (lats >= min_lat) & (lats <= max_lat)
@@ -317,18 +317,18 @@ def extract_region_from_hdf(remote_path, bbox_4326, output_path):
             if not np.any(valid_pixels):
                 raise ValueError("The selected BBOX is completely outside the data's geographic extent.")
 
-            rows, cols = np.where(valid_pixels)
-            y_start, y_end = rows.min(), rows.max() + 1
-            x_start, x_end = cols.min(), cols.max() + 1
-
             # 4. Slice, normalize, and save the image
-            subset = data[y_start:y_end, x_start:x_end]
+            rows, cols = np.where(valid_pixels)
+            fill_value = f[data_key].attrs.get('_FillValue')
             
-            if subset.size == 0 or np.all(subset == fill_value):
+            subset = data[rows.min():rows.max()+1, cols.min():cols.max()+1]
+            
+            if subset.size == 0 or (fill_value is not None and np.all(subset == fill_value)):
                 raise ValueError("The selected BBOX slice is empty or contains only fill values.")
 
-            subset = np.ma.masked_equal(subset, fill_value)
-            subset = np.ma.filled(subset, 0)
+            if fill_value is not None:
+                subset = np.ma.masked_equal(subset, fill_value)
+                subset = np.ma.filled(subset, 0)
             
             vmin, vmax = subset.min(), subset.max()
             if vmax - vmin < 1e-6:
