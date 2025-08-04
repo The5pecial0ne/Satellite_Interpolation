@@ -105,7 +105,7 @@ def fetch_stitched_frames(req: TileRequest):
 
         try:
             utc_time = current_time.astimezone(pytz.utc).strftime('%H%M')
-            filename = f"3RIMG_{current_time.strftime('%d%b%Y').upper()}_{utc_time}_L2C_INS_V01R00.h5"
+            filename = f"3RIMG_{current_time.strftime('%d%b%Y').upper()}_{utc_time}_L1B_STD_V01R00.h5"
             extract_region_from_hdf(os.path.join(REMOTE_HDF_DIR, filename), req.bbox, frame_output_path)
             with job_lock:
                 job_status[job_id].append(f"Stitched frame for time {current_time.strftime('%H:%M')}")
