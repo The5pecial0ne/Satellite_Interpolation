@@ -12,10 +12,9 @@ from io import BytesIO
 import os, sys, shutil, traceback, math, pytz, uuid, re, h5py, paramiko, hashlib
 import numpy as np
 import cv2
-import hdf5plugin
 from subprocess import run
 
-# CONFIG
+# ---------------- CONFIG ----------------
 
 TILE_SIZE_PX = 256
 TIME_INTERVAL_MINUTES = 30
@@ -25,14 +24,13 @@ SSH_HOST = "192.168.2.221"
 SSH_PORT = 22
 SSH_USERNAME = "sac"
 SSH_PASSWORD = "sac123"
-REMOTE_HDF_BASE_DIR = "/mnt/infortrend_nas_nlsas3/RAW_DATA/INSAT3R/L1B_STD"
 
 TEMP_SESSION_DIRS = set()
 job_status = {}
 job_lock = Lock()
 transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
 
-# FASTAPI INIT
+# ---------------- FASTAPI INIT ----------------
 
 app = FastAPI()
 app.add_middleware(
@@ -43,7 +41,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MODELS
+# ---------------- MODELS ----------------
 
 class TileRequest(BaseModel):
     datetime: str
@@ -55,71 +53,36 @@ class InterpolationRequest(BaseModel):
     session_id: str
     job_id: str
 
-# HELPERS
+# ---------------- HELPERS ----------------
 
 def bbox_hash(bbox: List[float]) -> str:
     return hashlib.md5(",".join(map(str, bbox)).encode()).hexdigest()[:8]
 
 def create_temp_dir(session_id: str) -> str:
-    """
-    Creates a temporary session directory.
-    This function is now the single source of truth for the directory naming
-    convention and is responsible for adding the 'session_' prefix.
-    It should always be passed the RAW, unprefixed session ID.
-    """
-    # This function NOW adds the "session_" prefix.
     temp_dir = os.path.join(os.path.dirname(__file__), "temp_stitched", f"session_{session_id}")
     os.makedirs(temp_dir, exist_ok=True)
     TEMP_SESSION_DIRS.add(temp_dir)
     return temp_dir
 
+def build_remote_hdf_path(dt: datetime) -> str:
+    date_path = dt.strftime("%Y/%m/%d")
+    utc_time = dt.astimezone(pytz.utc).strftime('%H%M')
+    filename = f"3RIMG_{dt.strftime('%d%b%Y').upper()}_{utc_time}_L1B_STD_V01R00.h5"
+    return f"/mnt/infortrend_nas_nlsas3/RAW_DATA/INSAT3R/L1B_STD/{date_path}/{filename}"
+
 def fetch_remote_h5(remote_path: str) -> str:
-    """
-    Fetches a remote HDF5 file via SFTP and verifies its integrity by
-    comparing file sizes to prevent processing corrupted downloads.
-    """
     local_h5 = os.path.join("/tmp", os.path.basename(remote_path))
     print(f"[DEBUG] Fetching HDF5: {remote_path}")
-    
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.connect(SSH_HOST, port=SSH_PORT, username=SSH_USERNAME, password=SSH_PASSWORD)
-    
     try:
-        sftp = ssh.open_sftp()
-        
-        # 1. Get the size of the remote file BEFORE downloading
-        try:
-            remote_size = sftp.stat(remote_path).st_size
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Remote file not found at: {remote_path}")
-
-        print(f"[INFO] Remote file size is {remote_size} bytes.")
-        
-        # 2. Download the file
-        sftp.get(remote_path, local_h5)
-        
-        # 3. Get the size of the local file AFTER downloading
-        local_size = os.path.getsize(local_h5)
-        
-        print(f"[INFO] Local file size is {local_size} bytes.")
-
-        # 4. Verify that the sizes match, otherwise raise a clear error
-        if local_size != remote_size:
-            os.remove(local_h5) # Clean up the corrupt local file
-            raise IOError(
-                f"Download failed: File size mismatch for {os.path.basename(remote_path)}. "
-                f"Expected {remote_size} bytes, but got {local_size} bytes."
-            )
-            
+        ssh.open_sftp().get(remote_path, local_h5)
     finally:
-        if 'sftp' in locals():
-            sftp.close()
         ssh.close()
-        
     return local_h5
 
-# API: FETCH FRAMES
+# ---------------- API: FETCH FRAMES ----------------
 
 @app.post("/fetch-stitched-frames")
 def fetch_stitched_frames(req: TileRequest):
@@ -146,15 +109,8 @@ def fetch_stitched_frames(req: TileRequest):
             job_status[job_id].append(f"Fetching frame for time {current_time.strftime('%H:%M')}")
 
         try:
-            utc_time = current_time.astimezone(pytz.utc).strftime('%H%M')
-            dynamic_dir = os.path.join(REMOTE_HDF_BASE_DIR,
-                                    current_time.strftime('%Y'),
-                                    current_time.strftime('%m'),
-                                    current_time.strftime('%d'))
-
-            filename = f"3RIMG_{current_time.strftime('%d%b%Y').upper()}_{utc_time}_L1B_STD_V01R00.h5"
-            remote_file_path = os.path.join(dynamic_dir, filename)
-            extract_region_from_hdf(remote_file_path, req.bbox, frame_output_path)
+            remote_hdf_path = build_remote_hdf_path(current_time)
+            extract_region_from_hdf(remote_hdf_path, req.bbox, frame_output_path)
             with job_lock:
                 job_status[job_id].append(f"Stitched frame for time {current_time.strftime('%H:%M')}")
         except Exception as e:
@@ -167,11 +123,11 @@ def fetch_stitched_frames(req: TileRequest):
     return {
         "message": "Frames stitched successfully",
         "directory": temp_dir,
-        "session_id": session_id,
+        "session_id": f"session_{session_id}",
         "job_id": job_id
     }
 
-# API: INTERPOLATION
+# ---------------- API: INTERPOLATION ----------------
 
 @app.post("/interpolate-and-generate-video")
 def interpolate_and_generate_video(req: InterpolationRequest):
@@ -223,10 +179,7 @@ def interpolate_and_generate_video(req: InterpolationRequest):
             shutil.move(os.path.join(tmp_dir, "output", f), os.path.join(output_dir, f"img{global_frame_index}.png"))
             global_frame_index += 1
 
-        try:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-        except Exception as e:
-            print(f"[WARN] Failed to remove tmp_rife: {e}")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
     shutil.copy(os.path.join(norm_dir, frames[-1]), os.path.join(output_dir, f"img{global_frame_index}.png"))
 
@@ -247,7 +200,7 @@ def interpolate_and_generate_video(req: InterpolationRequest):
         job_status[job_id].append("Video generation complete.")
     return FileResponse(path=video_path, media_type="video/mp4", filename="interpolated_video.mp4")
 
-# API: JOB STATUS
+# ---------------- API: JOB STATUS ----------------
 
 @app.get("/job-status/{job_id}")
 def get_job_status(job_id: str):
@@ -256,7 +209,7 @@ def get_job_status(job_id: str):
             raise HTTPException(status_code=404, detail="Job ID not found")
         return {"status": job_status[job_id]}
 
-# API: PREVIEW FRAME
+# ---------------- API: PREVIEW FRAME ----------------
 
 @app.get("/preview-frame")
 def preview_frame(
@@ -288,16 +241,8 @@ def preview_frame(
         if os.path.exists(preview_path):
             return FileResponse(preview_path, media_type="image/png")
 
-        utc_time_str = dt.astimezone(pytz.utc).strftime('%H%M')
-        # Construct the dynamic remote directory from the date
-        dynamic_dir = os.path.join(REMOTE_HDF_BASE_DIR,
-                                dt.strftime('%Y'),
-                                dt.strftime('%m'),
-                                dt.strftime('%d'))
-
-        h5_filename = f"3RIMG_{dt.strftime('%d%b%Y').upper()}_{utc_time_str}_L1B_STD_V01R00.h5"
-        remote_file_path = os.path.join(dynamic_dir, h5_filename)
-        extract_region_from_hdf(remote_file_path, bbox, preview_path)
+        remote_hdf_path = build_remote_hdf_path(dt)
+        extract_region_from_hdf(remote_hdf_path, bbox, preview_path)
 
         return FileResponse(preview_path, media_type="image/png")
 
@@ -305,86 +250,73 @@ def preview_frame(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
 
-# UTIL: HDF REGION EXTRACTION (v4 - Final with Scaling)
+# ---------------- UTIL: HDF REGION EXTRACTION ----------------
+
 def extract_region_from_hdf(remote_path, bbox_4326, output_path):
-    """
-    Extracts a geographic region from the HDF5 file, handling multiple
-    resolutions and applying the necessary scale factor to the coordinates.
-    """
     local_h5 = fetch_remote_h5(remote_path)
 
-    try:
-        with h5py.File(local_h5, "r") as f:
-            # --- CONFIGURATION ---
-            data_key = 'IMG_VIS' 
+    with h5py.File(local_h5, "r") as f:
+        # --- Read raw arrays ---
+        lat_raw = f["Latitude_VIS"][:]
+        lon_raw = f["Longitude_VIS"][:]
+        vis_data = f["IMG_VIS"][:]
 
-            if data_key not in f:
-                raise ValueError(f"Data key '{data_key}' not found in file.")
+        # --- Attributes ---
+        scale_lat = f["Latitude_VIS"].attrs.get("scale_factor", 1.0)
+        offset_lat = f["Latitude_VIS"].attrs.get("add_offset", 0.0)
+        scale_lon = f["Longitude_VIS"].attrs.get("scale_factor", 1.0)
+        offset_lon = f["Longitude_VIS"].attrs.get("add_offset", 0.0)
+        lat_fill = f["Latitude_VIS"].attrs.get("_FillValue", 327670)
+        lon_fill = f["Longitude_VIS"].attrs.get("_FillValue", 327670)
+        vis_fill = f["IMG_VIS"].attrs.get("_FillValue", 327670)
 
-            # 1. Dynamically select the correct Latitude/Longitude keys
-            if data_key in ['IMG_VIS', 'IMG_SWIR']:
-                lon_key = 'Longitude_VIS'
-                lat_key = 'Latitude_VIS'
-            else:
-                lon_key = 'Longitude'
-                lat_key = 'Latitude'
+        # --- Convert to float and scale ---
+        lat = lat_raw.astype(np.float32) * scale_lat + offset_lat
+        lon = lon_raw.astype(np.float32) * scale_lon + offset_lon
 
-            print(f"[INFO] Using data key '{data_key}' with coordinate keys '{lat_key}' and '{lon_key}'.")
+        # --- Filter out invalid lat/lon/vis values ---
+        valid_mask = (lat_raw != lat_fill) & (lon_raw != lon_fill) & (vis_data != vis_fill)
 
-            if lon_key not in f or lat_key not in f:
-                raise ValueError(f"Required coordinate keys '{lat_key}' or '{lon_key}' not found.")
+        # --- Bounding Box (EPSG:4326) ---
+        min_lon, min_lat, max_lon, max_lat = bbox_4326
 
-            # 2. Read coordinate datasets and apply the scale factor
-            lon_ds = f[lon_key]
-            lat_ds = f[lat_key]
+        # --- Pixels within BBOX and valid ---
+        in_bbox = (
+            (lat >= min_lat) & (lat <= max_lat) &
+            (lon >= min_lon) & (lon <= max_lon) &
+            valid_mask
+        )
 
-            # The crucial step: Convert integer coordinates to degrees
-            lon_scale = lon_ds.attrs['scale_factor'][0]
-            lat_scale = lat_ds.attrs['scale_factor'][0]
-            
-            lons = lon_ds[:] * lon_scale
-            lats = lat_ds[:] * lat_scale
+        print(f"[DEBUG] Scaled lat range: {lat.min()} to {lat.max()}")
+        print(f"[DEBUG] Scaled lon range: {lon.min()} to {lon.max()}")
+        print(f"[DEBUG] Pixels in BBOX and valid: {np.sum(in_bbox)}")
 
-            data = f[data_key][:].squeeze()
+        if not np.any(in_bbox):
+            raise ValueError("Selected BBOX contains no data in VIS band.")
 
-            if data.shape != lats.shape:
-                raise ValueError(f"Shape mismatch! Data shape {data.shape} != coordinate shape {lats.shape}.")
-            
-            # 3. Find pixel indices for the given BBOX (now in correct units)
-            min_lon, min_lat, max_lon, max_lat = bbox_4326
-            valid_pixels = (lons >= min_lon) & (lons <= max_lon) & \
-                           (lats >= min_lat) & (lats <= max_lat)
+        # --- Extract bounding box window ---
+        indices = np.argwhere(in_bbox)
+        y_min, x_min = indices.min(axis=0)
+        y_max, x_max = indices.max(axis=0)
 
-            if not np.any(valid_pixels):
-                raise ValueError("The selected BBOX is completely outside the data's geographic extent.")
+        print(f"[DEBUG] Cropping VIS data from Y: {y_min}-{y_max}, X: {x_min}-{x_max}")
 
-            # 4. Slice, normalize, and save the image
-            rows, cols = np.where(valid_pixels)
-            fill_value = f[data_key].attrs.get('_FillValue')
-            
-            subset = data[rows.min():rows.max()+1, cols.min():cols.max()+1]
-            
-            if subset.size == 0 or (fill_value is not None and np.all(subset == fill_value)):
-                raise ValueError("The selected BBOX slice is empty or contains only fill values.")
+        # --- Crop and normalize ---
+        crop = vis_data[y_min:y_max + 1, x_min:x_max + 1]
+        crop = np.ma.masked_equal(crop, vis_fill)
 
-            if fill_value is not None:
-                subset = np.ma.masked_equal(subset, fill_value)
-                subset = np.ma.filled(subset, 0)
-            
-            vmin, vmax = subset.min(), subset.max()
-            if vmax - vmin < 1e-6:
-                normalized_subset = np.zeros_like(subset, dtype=np.uint8)
-            else:
-                normalized_subset = ((subset - vmin) / (vmax - vmin)) * 255
-            
-            Image.fromarray(normalized_subset.astype(np.uint8)).save(output_path)
-            print(f"[INFO] Saved extracted region to {output_path}")
+        if crop.count() == 0:
+            raise ValueError("Selected BBOX contains only fill values after crop.")
 
-    finally:
-        if os.path.exists(local_h5):
-            os.remove(local_h5)
+        crop = np.ma.filled(crop, 0)
+        norm = (crop - crop.min()) / (crop.max() - crop.min() + 1e-6)
 
-# CLASS: BRIGHTNESS NORMALIZER
+        Image.fromarray((norm * 255).astype(np.uint8)).save(output_path)
+        print(f"[INFO] Saved preview to {output_path}")
+
+    os.remove(local_h5)
+
+# ---------------- CLASS: BRIGHTNESS NORMALIZER ----------------
 
 class BrightnessNormalizer:
     def __init__(self, input_dir, output_dir, max_threads=8):
@@ -448,7 +380,7 @@ class BrightnessNormalizer:
                 except Exception as e:
                     print(f"[ERROR] Normalization failed: {e}")
 
-# SHUTDOWN CLEANUP
+# ---------------- SHUTDOWN CLEANUP ----------------
 
 @app.on_event("shutdown")
 def cleanup_temp_sessions():
