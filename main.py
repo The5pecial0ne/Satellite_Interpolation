@@ -253,68 +253,86 @@ def preview_frame(
 # ---------------- UTIL: HDF REGION EXTRACTION ----------------
 
 def extract_region_from_hdf(remote_path, bbox_4326, output_path):
+    """
+    Extracts a geographic region from the HDF5 file, handling coordinate scaling,
+    resolution, fill values, and normalization.
+    """
     local_h5 = fetch_remote_h5(remote_path)
 
-    with h5py.File(local_h5, "r") as f:
-        # --- Read raw arrays ---
-        lat_raw = f["Latitude_VIS"][:]
-        lon_raw = f["Longitude_VIS"][:]
-        vis_data = f["IMG_VIS"][:]
+    try:
+        with h5py.File(local_h5, "r") as f:
+            # --- Target dataset and corresponding lat/lon ---
+            data_key = "IMG_VIS"
 
-        # --- Attributes ---
-        scale_lat = f["Latitude_VIS"].attrs.get("scale_factor", 1.0)
-        offset_lat = f["Latitude_VIS"].attrs.get("add_offset", 0.0)
-        scale_lon = f["Longitude_VIS"].attrs.get("scale_factor", 1.0)
-        offset_lon = f["Longitude_VIS"].attrs.get("add_offset", 0.0)
-        lat_fill = f["Latitude_VIS"].attrs.get("_FillValue", 327670)
-        lon_fill = f["Longitude_VIS"].attrs.get("_FillValue", 327670)
-        vis_fill = f["IMG_VIS"].attrs.get("_FillValue", 327670)
+            if data_key not in f:
+                raise ValueError(f"Dataset '{data_key}' not found in file.")
 
-        # --- Convert to float and scale ---
-        lat = lat_raw.astype(np.float32) * scale_lat + offset_lat
-        lon = lon_raw.astype(np.float32) * scale_lon + offset_lon
+            if data_key in ["IMG_VIS", "IMG_SWIR"]:
+                lat_key = "Latitude_VIS"
+                lon_key = "Longitude_VIS"
+            else:
+                lat_key = "Latitude"
+                lon_key = "Longitude"
 
-        # --- Filter out invalid lat/lon/vis values ---
-        valid_mask = (lat_raw != lat_fill) & (lon_raw != lon_fill) & (vis_data != vis_fill)
+            if lat_key not in f or lon_key not in f:
+                raise ValueError(f"Latitude or Longitude key not found: {lat_key}, {lon_key}")
 
-        # --- Bounding Box (EPSG:4326) ---
-        min_lon, min_lat, max_lon, max_lat = bbox_4326
+            print(f"[INFO] Using dataset '{data_key}' with lat/lon keys: {lat_key}, {lon_key}")
 
-        # --- Pixels within BBOX and valid ---
-        in_bbox = (
-            (lat >= min_lat) & (lat <= max_lat) &
-            (lon >= min_lon) & (lon <= max_lon) &
-            valid_mask
-        )
+            # --- Read and apply scale factors to coordinates ---
+            lat_ds = f[lat_key]
+            lon_ds = f[lon_key]
 
-        print(f"[DEBUG] Scaled lat range: {lat.min()} to {lat.max()}")
-        print(f"[DEBUG] Scaled lon range: {lon.min()} to {lon.max()}")
-        print(f"[DEBUG] Pixels in BBOX and valid: {np.sum(in_bbox)}")
+            lat_scale = lat_ds.attrs["scale_factor"][0]
+            lon_scale = lon_ds.attrs["scale_factor"][0]
 
-        if not np.any(in_bbox):
-            raise ValueError("Selected BBOX contains no data in VIS band.")
+            lats = lat_ds[:] * lat_scale
+            lons = lon_ds[:] * lon_scale
 
-        # --- Extract bounding box window ---
-        indices = np.argwhere(in_bbox)
-        y_min, x_min = indices.min(axis=0)
-        y_max, x_max = indices.max(axis=0)
+            # --- Read data ---
+            data = f[data_key][:].squeeze()
+            if data.shape != lats.shape:
+                raise ValueError(f"Data shape {data.shape} != coordinate shape {lats.shape}")
 
-        print(f"[DEBUG] Cropping VIS data from Y: {y_min}-{y_max}, X: {x_min}-{x_max}")
+            # --- Extract BBOX region ---
+            min_lon, min_lat, max_lon, max_lat = bbox_4326
+            valid_mask = (lons >= min_lon) & (lons <= max_lon) & \
+                         (lats >= min_lat) & (lats <= max_lat)
 
-        # --- Crop and normalize ---
-        crop = vis_data[y_min:y_max + 1, x_min:x_max + 1]
-        crop = np.ma.masked_equal(crop, vis_fill)
+            print(f"[DEBUG] Pixels in BBOX and valid: {np.sum(valid_mask)}")
 
-        if crop.count() == 0:
-            raise ValueError("Selected BBOX contains only fill values after crop.")
+            if not np.any(valid_mask):
+                raise ValueError("The selected BBOX is completely outside the data's extent.")
 
-        crop = np.ma.filled(crop, 0)
-        norm = (crop - crop.min()) / (crop.max() - crop.min() + 1e-6)
+            # --- Get bounds from valid pixels ---
+            rows, cols = np.where(valid_mask)
+            y_min, y_max = rows.min(), rows.max()
+            x_min, x_max = cols.min(), cols.max()
+            print(f"[DEBUG] Cropping data from rows {y_min}-{y_max}, cols {x_min}-{x_max}")
 
-        Image.fromarray((norm * 255).astype(np.uint8)).save(output_path)
-        print(f"[INFO] Saved preview to {output_path}")
+            subset = data[y_min:y_max + 1, x_min:x_max + 1]
 
-    os.remove(local_h5)
+            # --- Handle fill values ---
+            fill_value = f[data_key].attrs.get("_FillValue")
+            if fill_value is not None:
+                if np.all(subset == fill_value):
+                    raise ValueError("The selected BBOX contains only fill values.")
+                subset = np.ma.masked_equal(subset, fill_value)
+                subset = np.ma.filled(subset, 0)
+
+            # --- Normalize ---
+            vmin, vmax = subset.min(), subset.max()
+            if vmax - vmin < 1e-6:
+                normalized = np.zeros_like(subset, dtype=np.uint8)
+            else:
+                normalized = ((subset - vmin) / (vmax - vmin)) * 255
+
+            Image.fromarray(normalized.astype(np.uint8)).save(output_path)
+            print(f"[INFO] Saved preview to {output_path}")
+
+    finally:
+        if os.path.exists(local_h5):
+            os.remove(local_h5)
 
 # ---------------- CLASS: BRIGHTNESS NORMALIZER ----------------
 
