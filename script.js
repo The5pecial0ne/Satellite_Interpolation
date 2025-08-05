@@ -122,7 +122,7 @@ function fetchAndGenerateVideo() {
   const zoom = Math.floor(map.getView().getZoom());
   const bboxStr = bbox4326.map(v => v.toFixed(2)).join(", ");
 
-  addLog(`Started video generation for BBOX = (${bboxStr}) & Time = ${startTime} → ${endTime} IST`);
+  addLog(`Started video generation for BBOX = (${bboxStr}) & Time = ${startTime} to ${endTime} IST`);
   updateProgressBar(5);
 
   fetch("http://localhost:8000/fetch-stitched-frames", {

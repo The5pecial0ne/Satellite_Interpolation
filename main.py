@@ -50,7 +50,6 @@ class TileRequest(BaseModel):
     endtime: str
     bbox: List[float]
     zoom: int
-    session_id: str
 
 class InterpolationRequest(BaseModel):
     session_id: str
@@ -62,6 +61,13 @@ def bbox_hash(bbox: List[float]) -> str:
     return hashlib.md5(",".join(map(str, bbox)).encode()).hexdigest()[:8]
 
 def create_temp_dir(session_id: str) -> str:
+    """
+    Creates a temporary session directory.
+    This function is now the single source of truth for the directory naming
+    convention and is responsible for adding the 'session_' prefix.
+    It should always be passed the RAW, unprefixed session ID.
+    """
+    # This function NOW adds the "session_" prefix.
     temp_dir = os.path.join(os.path.dirname(__file__), "temp_stitched", f"session_{session_id}")
     os.makedirs(temp_dir, exist_ok=True)
     TEMP_SESSION_DIRS.add(temp_dir)
@@ -141,7 +147,6 @@ def fetch_stitched_frames(req: TileRequest):
 
         try:
             utc_time = current_time.astimezone(pytz.utc).strftime('%H%M')
-            # Construct the dynamic remote directory from the date
             dynamic_dir = os.path.join(REMOTE_HDF_BASE_DIR,
                                     current_time.strftime('%Y'),
                                     current_time.strftime('%m'),
@@ -171,7 +176,7 @@ def fetch_stitched_frames(req: TileRequest):
 @app.post("/interpolate-and-generate-video")
 def interpolate_and_generate_video(req: InterpolationRequest):
     job_id = req.job_id
-    session_dir = os.path.join(os.path.dirname(__file__), "temp_stitched", f"session_{req.session_id}")
+    session_dir = os.path.join(os.path.dirname(__file__), "temp_stitched", req.session_id)
     norm_dir = os.path.join(session_dir, "normalized")
     output_dir = os.path.join(session_dir, "video_frames")
     os.makedirs(output_dir, exist_ok=True)
