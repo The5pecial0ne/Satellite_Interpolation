@@ -12,6 +12,7 @@ from io import BytesIO
 import os, sys, shutil, traceback, math, pytz, uuid, re, h5py, paramiko, hashlib
 import numpy as np
 import cv2
+import hdf5plugin
 from subprocess import run
 
 # CONFIG
@@ -49,6 +50,7 @@ class TileRequest(BaseModel):
     endtime: str
     bbox: List[float]
     zoom: int
+    session_id: str
 
 class InterpolationRequest(BaseModel):
     session_id: str
@@ -60,21 +62,55 @@ def bbox_hash(bbox: List[float]) -> str:
     return hashlib.md5(",".join(map(str, bbox)).encode()).hexdigest()[:8]
 
 def create_temp_dir(session_id: str) -> str:
-    temp_dir = os.path.join(os.path.dirname(__file__), "temp_stitched", session_id)
+    temp_dir = os.path.join(os.path.dirname(__file__), "temp_stitched", f"session_{session_id}")
     os.makedirs(temp_dir, exist_ok=True)
     TEMP_SESSION_DIRS.add(temp_dir)
     return temp_dir
 
 def fetch_remote_h5(remote_path: str) -> str:
+    """
+    Fetches a remote HDF5 file via SFTP and verifies its integrity by
+    comparing file sizes to prevent processing corrupted downloads.
+    """
     local_h5 = os.path.join("/tmp", os.path.basename(remote_path))
     print(f"[DEBUG] Fetching HDF5: {remote_path}")
+    
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.connect(SSH_HOST, port=SSH_PORT, username=SSH_USERNAME, password=SSH_PASSWORD)
+    
     try:
-        ssh.open_sftp().get(remote_path, local_h5)
+        sftp = ssh.open_sftp()
+        
+        # 1. Get the size of the remote file BEFORE downloading
+        try:
+            remote_size = sftp.stat(remote_path).st_size
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Remote file not found at: {remote_path}")
+
+        print(f"[INFO] Remote file size is {remote_size} bytes.")
+        
+        # 2. Download the file
+        sftp.get(remote_path, local_h5)
+        
+        # 3. Get the size of the local file AFTER downloading
+        local_size = os.path.getsize(local_h5)
+        
+        print(f"[INFO] Local file size is {local_size} bytes.")
+
+        # 4. Verify that the sizes match, otherwise raise a clear error
+        if local_size != remote_size:
+            os.remove(local_h5) # Clean up the corrupt local file
+            raise IOError(
+                f"Download failed: File size mismatch for {os.path.basename(remote_path)}. "
+                f"Expected {remote_size} bytes, but got {local_size} bytes."
+            )
+            
     finally:
+        if 'sftp' in locals():
+            sftp.close()
         ssh.close()
+        
     return local_h5
 
 # API: FETCH FRAMES
