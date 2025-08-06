@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
 from pyproj import CRS, Transformer
 from io import BytesIO
-import os, sys, shutil, traceback, math, pytz, uuid, re, h5py, paramiko, hashlib
+import os, sys, shutil, traceback, math, pytz, uuid, re, h5py, paramiko, hashlib, subprocess
 import numpy as np
 import cv2
 from subprocess import run
@@ -173,8 +173,8 @@ def interpolate_and_generate_video(req: InterpolationRequest):
         key=lambda f: int(re.search(r"_(\d{4})", f).group(1))
     )
 
-    rife_script = os.path.abspath("Practical-RIFE/inference_img.py")
-    rife_model = os.path.abspath("Practical-RIFE/train_log")
+    rife_script = os.path.abspath(os.path.join("Practical-RIFE", "inference_img.py"))
+    rife_model = os.path.abspath(os.path.join("Practical-RIFE", "train_log"))
     python_exec = sys.executable
     global_frame_index = 0
 
@@ -189,19 +189,8 @@ def interpolate_and_generate_video(req: InterpolationRequest):
         shutil.copy(os.path.join(norm_dir, time_a), os.path.join(tmp_dir, "0.png"))
         shutil.copy(os.path.join(norm_dir, time_b), os.path.join(tmp_dir, "1.png"))
 
-        try:
-            result = subprocess.run(
-                [python_exec, rife_script, "--img", "0.png", "1.png", "--exp", "5", "--model", rife_model],
-                cwd=tmp_dir,
-                check=True,
-                capture_output=True,
-                text=True
-            )
-        except subprocess.CalledProcessError as e:
-            print(f"[RIFE ERROR] Command failed:")
-            print(f"  STDOUT:\n{e.stdout}")
-            print(f"  STDERR:\n{e.stderr}")
-            raise
+        run([python_exec, rife_script, "--img", "0.png", "1.png", "--exp", "5", "--model", rife_model],
+            cwd=tmp_dir, check=True)
 
         shutil.copy(os.path.join(norm_dir, time_a), os.path.join(output_dir, f"img{global_frame_index}.png"))
         global_frame_index += 1
