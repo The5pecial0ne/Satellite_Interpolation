@@ -189,7 +189,17 @@ def interpolate_and_generate_video(req: InterpolationRequest):
         shutil.copy(os.path.join(norm_dir, time_a), os.path.join(tmp_dir, "0.png"))
         shutil.copy(os.path.join(norm_dir, time_b), os.path.join(tmp_dir, "1.png"))
 
-        run([python_exec, rife_script, "--img", "0.png", "1.png", "--exp", "5", "--model", rife_model], cwd=tmp_dir, check=True)
+        try:
+            run(
+                [python_exec, rife_script, "--img", "0.png", "1.png", "--exp", "5", "--model", rife_model],
+                cwd=tmp_dir,
+                check=True,
+                capture_output=True,
+                text=True
+            )
+        except subprocess.CalledProcessError as e:
+            print(f"[ERROR] RIFE failed:\nSTDOUT:\n{e.stdout}\nSTDERR:\n{e.stderr}")
+            raise
 
         shutil.copy(os.path.join(norm_dir, time_a), os.path.join(output_dir, f"img{global_frame_index}.png"))
         global_frame_index += 1
