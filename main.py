@@ -59,7 +59,7 @@ def bbox_hash(bbox: List[float]) -> str:
     return hashlib.md5(",".join(map(str, bbox)).encode()).hexdigest()[:8]
 
 def create_temp_dir(session_id: str) -> str:
-    temp_dir = os.path.join(os.path.dirname(__file__), "temp_stitched", f"session_{session_id}")
+    temp_dir = os.path.join(os.path.dirname(__file__), "temp_stitched", session_id)
     os.makedirs(temp_dir, exist_ok=True)
     TEMP_SESSION_DIRS.add(temp_dir)
     return temp_dir
@@ -95,7 +95,8 @@ def fetch_stitched_frames(req: TileRequest):
     if start_dt > end_dt:
         raise HTTPException(status_code=400, detail="Start time must be before end time.")
 
-    session_id, job_id = uuid.uuid4().hex[:8], uuid.uuid4().hex[:8]
+    session_id = uuid.uuid4().hex[:8]
+    job_id = uuid.uuid4().hex[:8]
     temp_dir = create_temp_dir(session_id)
 
     with job_lock:
@@ -142,7 +143,7 @@ def fetch_stitched_frames(req: TileRequest):
     return {
         "message": "Frames stitched successfully",
         "directory": temp_dir,
-        "session_id": f"session_{session_id}",
+        "session_id": session_id,
         "job_id": job_id
     }
 
