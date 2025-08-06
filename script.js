@@ -188,7 +188,7 @@ function previewSelectedFrame() {
 
   const datetime = `${date} ${time}`;
   const zoom = Math.floor(map.getView().getZoom());
-  const session = currentSessionId || `session_${Math.random().toString(36).substr(2, 8)}`;
+  const session = currentSessionId || `${Math.random().toString(36).substr(2, 8)}`;
   currentSessionId = session;
 
   const url = new URL("http://localhost:8000/preview-frame");
