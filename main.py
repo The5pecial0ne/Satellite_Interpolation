@@ -16,7 +16,6 @@ from subprocess import run
 
 # ---------------- CONFIG ----------------
 
-TILE_SIZE_PX = 256
 TIME_INTERVAL_MINUTES = 30
 MAX_WORKERS = 8
 
@@ -191,7 +190,7 @@ def interpolate_and_generate_video(req: InterpolationRequest):
         shutil.copy(os.path.join(norm_dir, time_b), os.path.join(tmp_dir, "1.png"))
 
         try:
-            run(
+            result = subprocess.run(
                 [python_exec, rife_script, "--img", "0.png", "1.png", "--exp", "5", "--model", rife_model],
                 cwd=tmp_dir,
                 check=True,
@@ -199,7 +198,9 @@ def interpolate_and_generate_video(req: InterpolationRequest):
                 text=True
             )
         except subprocess.CalledProcessError as e:
-            print(f"[ERROR] RIFE failed:\nSTDOUT:\n{e.stdout}\nSTDERR:\n{e.stderr}")
+            print(f"[RIFE ERROR] Command failed:")
+            print(f"  STDOUT:\n{e.stdout}")
+            print(f"  STDERR:\n{e.stderr}")
             raise
 
         shutil.copy(os.path.join(norm_dir, time_a), os.path.join(output_dir, f"img{global_frame_index}.png"))
