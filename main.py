@@ -101,18 +101,37 @@ def fetch_stitched_frames(req: TileRequest):
     with job_lock:
         job_status[job_id] = ["Job started..."]
 
+    crop_bounds = None  # This will be set from the first frame and reused
+
     current_time = start_dt
     while current_time <= end_dt:
         timestamp_str = current_time.strftime("%H%M")
         frame_output_path = os.path.join(temp_dir, f"frame_{timestamp_str}.png")
+
         with job_lock:
             job_status[job_id].append(f"Fetching frame for time {current_time.strftime('%H:%M')}")
 
         try:
             remote_hdf_path = build_remote_hdf_path(current_time)
-            extract_region_from_hdf(remote_hdf_path, req.bbox, frame_output_path)
+            
+            # Extract and fix bounds from first timestamp
+            if crop_bounds is None:
+                crop_bounds = extract_region_from_hdf(
+                    remote_hdf_path,
+                    req.bbox,
+                    frame_output_path
+                )
+            else:
+                extract_region_from_hdf(
+                    remote_hdf_path,
+                    req.bbox,
+                    frame_output_path,
+                    fixed_bounds=crop_bounds
+                )
+
             with job_lock:
                 job_status[job_id].append(f"Stitched frame for time {current_time.strftime('%H:%M')}")
+
         except Exception as e:
             traceback.print_exc()
             with job_lock:
@@ -252,75 +271,49 @@ def preview_frame(
 
 # ---------------- UTIL: HDF REGION EXTRACTION ----------------
 
-def extract_region_from_hdf(remote_path, bbox_4326, output_path):
-    """
-    Extracts a geographic region from the HDF5 file, handling coordinate scaling,
-    resolution, fill values, and normalization.
-    """
+def extract_region_from_hdf(remote_path, bbox_4326, output_path, fixed_bounds=None):
     local_h5 = fetch_remote_h5(remote_path)
 
     try:
         with h5py.File(local_h5, "r") as f:
-            # --- Target dataset and corresponding lat/lon ---
             data_key = "IMG_VIS"
+            lat_key = "Latitude_VIS"
+            lon_key = "Longitude_VIS"
 
-            if data_key not in f:
-                raise ValueError(f"Dataset '{data_key}' not found in file.")
-
-            if data_key in ["IMG_VIS", "IMG_SWIR"]:
-                lat_key = "Latitude_VIS"
-                lon_key = "Longitude_VIS"
-            else:
-                lat_key = "Latitude"
-                lon_key = "Longitude"
-
-            if lat_key not in f or lon_key not in f:
-                raise ValueError(f"Latitude or Longitude key not found: {lat_key}, {lon_key}")
-
-            print(f"[INFO] Using dataset '{data_key}' with lat/lon keys: {lat_key}, {lon_key}")
-
-            # --- Read and apply scale factors to coordinates ---
             lat_ds = f[lat_key]
             lon_ds = f[lon_key]
-
             lat_scale = lat_ds.attrs["scale_factor"][0]
             lon_scale = lon_ds.attrs["scale_factor"][0]
-
             lats = lat_ds[:] * lat_scale
             lons = lon_ds[:] * lon_scale
-
-            # --- Read data ---
             data = f[data_key][:].squeeze()
-            if data.shape != lats.shape:
-                raise ValueError(f"Data shape {data.shape} != coordinate shape {lats.shape}")
 
-            # --- Extract BBOX region ---
-            min_lon, min_lat, max_lon, max_lat = bbox_4326
-            valid_mask = (lons >= min_lon) & (lons <= max_lon) & \
-                         (lats >= min_lat) & (lats <= max_lat)
+            fill_value = f[data_key].attrs.get("_FillValue")
 
-            print(f"[DEBUG] Pixels in BBOX and valid: {np.sum(valid_mask)}")
-
-            if not np.any(valid_mask):
-                raise ValueError("The selected BBOX is completely outside the data's extent.")
-
-            # --- Get bounds from valid pixels ---
-            rows, cols = np.where(valid_mask)
-            y_min, y_max = rows.min(), rows.max()
-            x_min, x_max = cols.min(), cols.max()
-            print(f"[DEBUG] Cropping data from rows {y_min}-{y_max}, cols {x_min}-{x_max}")
+            # ---- Compute pixel bounds from BBOX if not given ----
+            if fixed_bounds is None:
+                min_lon, min_lat, max_lon, max_lat = bbox_4326
+                valid_mask = (lons >= min_lon) & (lons <= max_lon) & \
+                             (lats >= min_lat) & (lats <= max_lat)
+                if not np.any(valid_mask):
+                    raise ValueError("Selected BBOX does not overlap with data.")
+                rows, cols = np.where(valid_mask)
+                y_min, y_max = rows.min(), rows.max()
+                x_min, x_max = cols.min(), cols.max()
+                print(f"[DEBUG] Computed bounds from BBOX: Y {y_min}-{y_max}, X {x_min}-{x_max}")
+            else:
+                y_min, y_max, x_min, x_max = fixed_bounds
+                print(f"[DEBUG] Using fixed bounds: Y {y_min}-{y_max}, X {x_min}-{x_max}")
 
             subset = data[y_min:y_max + 1, x_min:x_max + 1]
 
-            # --- Handle fill values ---
-            fill_value = f[data_key].attrs.get("_FillValue")
             if fill_value is not None:
-                if np.all(subset == fill_value):
-                    raise ValueError("The selected BBOX contains only fill values.")
                 subset = np.ma.masked_equal(subset, fill_value)
+                if subset.count() == 0:
+                    raise ValueError("Selected region contains only fill values.")
                 subset = np.ma.filled(subset, 0)
 
-            # --- Normalize ---
+            # Normalize
             vmin, vmax = subset.min(), subset.max()
             if vmax - vmin < 1e-6:
                 normalized = np.zeros_like(subset, dtype=np.uint8)
@@ -328,7 +321,9 @@ def extract_region_from_hdf(remote_path, bbox_4326, output_path):
                 normalized = ((subset - vmin) / (vmax - vmin)) * 255
 
             Image.fromarray(normalized.astype(np.uint8)).save(output_path)
-            print(f"[INFO] Saved preview to {output_path}")
+            print(f"[INFO] Saved extracted frame to {output_path}")
+
+            return (y_min, y_max, x_min, x_max)
 
     finally:
         if os.path.exists(local_h5):
