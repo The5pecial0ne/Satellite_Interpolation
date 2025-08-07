@@ -14,7 +14,7 @@ import numpy as np
 import cv2
 from subprocess import run
 
-# ---------------- CONFIG ----------------
+# CONFIG
 
 TIME_INTERVAL_MINUTES = 30
 MAX_WORKERS = 8
@@ -29,7 +29,7 @@ job_status = {}
 job_lock = Lock()
 transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
 
-# ---------------- FASTAPI INIT ----------------
+# FASTAPI INIT
 
 app = FastAPI()
 app.add_middleware(
@@ -40,7 +40,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------- MODELS ----------------
+# MODELS
 
 class TileRequest(BaseModel):
     datetime: str
@@ -52,7 +52,7 @@ class InterpolationRequest(BaseModel):
     session_id: str
     job_id: str
 
-# ---------------- HELPERS ----------------
+# HELPERS
 
 def bbox_hash(bbox: List[float]) -> str:
     return hashlib.md5(",".join(map(str, bbox)).encode()).hexdigest()[:8]
@@ -81,7 +81,7 @@ def fetch_remote_h5(remote_path: str) -> str:
         ssh.close()
     return local_h5
 
-# ---------------- API: FETCH FRAMES ----------------
+# API: FETCH FRAMES
 
 @app.post("/fetch-stitched-frames")
 def fetch_stitched_frames(req: TileRequest):
@@ -146,7 +146,7 @@ def fetch_stitched_frames(req: TileRequest):
         "job_id": job_id
     }
 
-# ---------------- API: INTERPOLATION ----------------
+# API: INTERPOLATION
 
 @app.post("/interpolate-and-generate-video")
 def interpolate_and_generate_video(req: InterpolationRequest):
@@ -220,7 +220,7 @@ def interpolate_and_generate_video(req: InterpolationRequest):
         job_status[job_id].append("Video generation complete.")
     return FileResponse(path=video_path, media_type="video/mp4", filename="interpolated_video.mp4")
 
-# ---------------- API: JOB STATUS ----------------
+# API: JOB STATUS
 
 @app.get("/job-status/{job_id}")
 def get_job_status(job_id: str):
@@ -229,7 +229,7 @@ def get_job_status(job_id: str):
             raise HTTPException(status_code=404, detail="Job ID not found")
         return {"status": job_status[job_id]}
 
-# ---------------- API: PREVIEW FRAME ----------------
+# API: PREVIEW FRAME
 
 @app.get("/preview-frame")
 def preview_frame(
@@ -270,7 +270,7 @@ def preview_frame(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
 
-# ---------------- UTIL: HDF REGION EXTRACTION ----------------
+# UTIL: HDF REGION EXTRACTION
 
 def extract_region_from_hdf(remote_path, bbox_4326, output_path, fixed_bounds=None):
     local_h5 = fetch_remote_h5(remote_path)
@@ -330,7 +330,7 @@ def extract_region_from_hdf(remote_path, bbox_4326, output_path, fixed_bounds=No
         if os.path.exists(local_h5):
             os.remove(local_h5)
 
-# ---------------- CLASS: BRIGHTNESS NORMALIZER ----------------
+# CLASS: BRIGHTNESS NORMALIZER
 
 class BrightnessNormalizer:
     def __init__(self, input_dir, output_dir, max_threads=8):
@@ -394,7 +394,7 @@ class BrightnessNormalizer:
                 except Exception as e:
                     print(f"[ERROR] Normalization failed: {e}")
 
-# ---------------- SHUTDOWN CLEANUP ----------------
+# SHUTDOWN CLEANUP
 
 @app.on_event("shutdown")
 def cleanup_temp_sessions():
