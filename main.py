@@ -170,7 +170,7 @@ def interpolate_and_generate_video(req: InterpolationRequest):
 
     frames = sorted(
         [f for f in os.listdir(norm_dir) if f.startswith("frame_")],
-        key=lambda f: int(re.search(r"_(\d{4})", f).group(1))
+        key=lambda name: int(re.search(r"(\d+)", name).group(1)) if re.search(r"(\d+)", name) else float("inf")
     )
 
     rife_script = os.path.abspath(os.path.join("Practical-RIFE", "inference_img.py"))
