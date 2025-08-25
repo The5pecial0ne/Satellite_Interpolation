@@ -15,6 +15,6 @@ Satellite Interpolation (Root)
 |
 |->main.py
 ```
-frontend - python3 -m http.server 8080
+frontend - ```python3 -m http.server 8080```
 
-backend - uvicorn main::app
+backend - ```uvicorn main::app```
