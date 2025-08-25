@@ -4,6 +4,10 @@
 
 *main.py* - Backend for WMS GeoTIFF file logic, pixel and resolution calculation, previewing a frame, calling Interpolation model to produce intermediate frames and generate .mp4 video
 
+frontend - python3 -m http.server 8080
+backend - uvicorn main::app
+
+```
 Satellite Interpolation (Root)
 |
 |->Practical-RIFE/....
@@ -13,6 +17,4 @@ Satellite Interpolation (Root)
 |->script.js
 |
 |->main.py
-
-frontend - python3 -m http.server 8080
-backend - uvicorn main::app
+```
