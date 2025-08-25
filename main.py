@@ -16,9 +16,10 @@ import rasterio
 import rasterio.mask
 from shapely.geometry import box
 
-# --- HISTOGRAM MATCHING LIBRARY COMMENTED OUT ---
-# from skimage.exposure import match_histograms
-# ----------------------------------------------
+# --- NORMALIZATION LIBRARY RE-ENABLED ---
+# Make sure you have this installed: pip install scikit-image
+from skimage.exposure import match_histograms
+# ----------------------------------------
 
 # CONFIG
 TIME_INTERVAL_MINUTES = 30
@@ -151,18 +152,18 @@ def interpolate_and_generate_video(req: InterpolationRequest):
         raise HTTPException(status_code=400, detail="At least two stitched frames required.")
 
     # =================================================================
-    # === KEY CHANGE: Global Min-Max Normalization is now active    ===
+    # === KEY CHANGE: Normalization using Histogram Matching is active ===
     # =================================================================
     with job_lock:
-        job_status[job_id].append("Normalizing frames using global min-max...")
+        job_status[job_id].append("Normalizing frames using histogram matching...")
 
-    # 1. Instantiate the Global Min-Max normalizer.
-    normalizer = BrightnessNormalizer(session_dir, norm_dir, MAX_WORKERS)
+    # 1. Define the path to the reference image. The first frame is a great choice.
+    reference_frame_path = os.path.join(session_dir, frame_files[0])
+
+    # 2. Instantiate the normalizer, passing the reference frame path.
+    normalizer = BrightnessNormalizer(session_dir, norm_dir, reference_frame_path, MAX_WORKERS)
     
-    # 2. Compute the global statistics across all frames.
-    normalizer.compute_global_min_max()
-
-    # 3. Apply the normalization to all frames.
+    # 3. Call the normalization process.
     normalizer.normalize_images()
     # =================================================================
 
@@ -313,91 +314,9 @@ def extract_region_from_geotiff(remote_path, bbox_4326, output_path):
         if os.path.exists(local_tif):
             os.remove(local_tif)
 
-
 # =========================================================================
-# === BrightnessNormalizer using Global Min-Max is now active           ===
+# === BrightnessNormalizer using Histogram Matching is now active       ===
 # =========================================================================
-class BrightnessNormalizer:
-    def __init__(self, input_dir, output_dir, max_threads=8):
-        self.input_dir = input_dir
-        self.output_dir = output_dir
-        self.max_threads = max_threads
-        self.global_min = None
-        self.global_max = None
-        os.makedirs(self.output_dir, exist_ok=True)
-
-    def _compute_file_min_max(self, filename):
-        img = cv2.imread(os.path.join(self.input_dir, filename), cv2.IMREAD_GRAYSCALE)
-        if img is None: return None, None
-        return np.percentile(img, 2), np.percentile(img, 98)
-
-    def compute_global_min_max(self):
-        files = [f for f in os.listdir(self.input_dir) if f.startswith("frame_") and f.endswith(".png")]
-        if not files:
-            raise ValueError("No input frames found for min/max computation.")
-
-        min_vals, max_vals = [], []
-        with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
-            futures = {executor.submit(self._compute_file_min_max, f): f for f in files}
-            for future in as_completed(futures):
-                try:
-                    min_val, max_val = future.result()
-                    if min_val is not None:
-                        min_vals.append(min_val)
-                        max_vals.append(max_val)
-                except Exception as e:
-                    print(f"[ERROR] Min/Max computation failed: {e}")
-
-        if not min_vals or not max_vals:
-            raise ValueError("Could not compute global brightness stats.")
-        
-        # Set global range using the absolute min and max of the percentiles
-        self.global_min, self.global_max = min(min_vals), max(max_vals)
-        print(f"[INFO] Global min/max computed: {self.global_min:.2f}, {self.global_max:.2f}")
-
-    def _normalize_file(self, filename):
-        input_path = os.path.join(self.input_dir, filename)
-        output_path = os.path.join(self.output_dir, filename)
-
-        img = cv2.imread(input_path, cv2.IMREAD_UNCHANGED)
-        if img is None:
-            print(f"[WARN] Failed to load image: {input_path}")
-            return
-
-        if len(img.shape) == 2:
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-
-        # Ensure we don't divide by zero if the range is flat
-        if (self.global_max - self.global_min) < 1e-6:
-            norm = np.zeros_like(img, dtype=np.uint8)
-        else:
-            scale = 255.0 / (self.global_max - self.global_min)
-            norm = np.zeros_like(img, dtype=np.float32)
-            for c in range(3):
-                norm[:, :, c] = (img[:, :, c] - self.global_min) * scale
-            
-            # Clip the values to the valid 0-255 range
-            norm = np.clip(norm, 0, 255)
-
-        cv2.imwrite(output_path, norm.astype(np.uint8))
-
-    def normalize_images(self):
-        if self.global_min is None or self.global_max is None:
-            raise ValueError("Global min/max have not been computed. Call compute_global_min_max() first.")
-
-        files = [f for f in os.listdir(self.input_dir) if f.startswith("frame_") and f.endswith(".png")]
-        with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
-            futures = {executor.submit(self._normalize_file, f): f for f in files}
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    print(f"[ERROR] Normalization failed for a frame: {e}")
-
-# =========================================================================
-# === BrightnessNormalizer using Histogram Matching is commented out    ===
-# =========================================================================
-"""
 class BrightnessNormalizer:
     def __init__(self, input_dir, output_dir, reference_image_path, max_threads=8):
         self.input_dir = input_dir
@@ -421,6 +340,9 @@ class BrightnessNormalizer:
             return
 
         # Use scikit-image's histogram matching function.
+        # It intelligently reshapes the source image's pixel distribution
+        # to match the reference, effectively transferring its look and feel.
+        # The `channel_axis=-1` argument handles the color channels correctly.
         matched_image = match_histograms(source_image, self.reference_image, channel_axis=-1)
 
         # The output is float, so convert back to uint8 for saving.
@@ -436,9 +358,7 @@ class BrightnessNormalizer:
                     future.result()
                 except Exception as e:
                     print(f"[ERROR] Histogram matching failed for a frame: {e}")
-"""
 # =========================================================================
-
 
 # SHUTDOWN CLEANUP
 @app.on_event("shutdown")
